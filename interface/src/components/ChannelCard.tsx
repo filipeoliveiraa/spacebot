@@ -3,19 +3,22 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { ChannelInfo } from "@/api/client";
-import type { ActiveBranch, ActiveWorker, ChannelLiveState } from "@/hooks/useChannelLiveState";
+import { isOpenCodeWorker, type ActiveBranch, type ActiveWorker, type ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { LiveDuration } from "@/components/LiveDuration";
 import { formatTimeAgo, formatTimestamp, platformIcon, platformColor } from "@/lib/format";
 
 const VISIBLE_MESSAGES = 6;
 
 function WorkerBadge({ worker }: { worker: ActiveWorker }) {
+	const oc = isOpenCodeWorker(worker);
 	return (
-		<div className="flex items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny">
-			<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+		<div className={`flex items-center gap-2 rounded-md px-2.5 py-1.5 text-tiny ${
+			oc ? "bg-zinc-500/10" : "bg-amber-500/10"
+		}`}>
+			<div className={`h-1.5 w-1.5 animate-pulse rounded-full ${oc ? "bg-zinc-400" : "bg-amber-400"}`} />
 			<div className="min-w-0 flex-1">
 				<div className="flex items-center gap-1.5">
-					<span className="font-medium text-amber-300">Worker</span>
+					<span className={`font-medium ${oc ? "text-zinc-300" : "text-amber-300"}`}>Worker</span>
 					<span className="truncate text-ink-dull">{worker.task}</span>
 				</div>
 				<div className="mt-0.5 flex items-center gap-2 text-ink-faint">
@@ -23,7 +26,7 @@ function WorkerBadge({ worker }: { worker: ActiveWorker }) {
 					{worker.currentTool && (
 						<>
 							<span className="text-ink-faint/50">·</span>
-							<span className="text-amber-400/70">{worker.currentTool}</span>
+							<span className={oc ? "text-zinc-400/70" : "text-amber-400/70"}>{worker.currentTool}</span>
 						</>
 					)}
 					{worker.toolCalls > 0 && (
@@ -99,9 +102,12 @@ export function ChannelCard({
 			<div className="flex items-start justify-between p-4 pb-2">
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2">
-						<h3 className="truncate font-medium text-ink">
-							{channel.display_name ?? channel.id}
-						</h3>
+					<h3 className="truncate font-medium text-ink">
+						{channel.display_name ?? channel.id}
+						{channel.display_name && (
+							<span className="ml-2 font-normal text-ink-faint text-tiny">{channel.id}</span>
+						)}
+					</h3>
 						{isTyping && (
 							<div className="flex items-center gap-1">
 								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />

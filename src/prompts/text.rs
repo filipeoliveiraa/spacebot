@@ -64,9 +64,12 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "memory_persistence") => include_str!("../../prompts/en/memory_persistence.md.j2"),
         ("en", "ingestion") => include_str!("../../prompts/en/ingestion.md.j2"),
         ("en", "cortex_chat") => include_str!("../../prompts/en/cortex_chat.md.j2"),
+        ("en", "factory") => include_str!("../../prompts/en/factory.md.j2"),
 
         // Adapter-specific prompt fragments
         ("en", "adapters/email") => include_str!("../../prompts/en/adapters/email.md.j2"),
+        ("en", "adapters/cron") => include_str!("../../prompts/en/adapters/cron.md.j2"),
+        ("en", "adapters/signal") => include_str!("../../prompts/en/adapters/signal.md.j2"),
 
         // Fragment Templates
         ("en", "fragments/worker_capabilities") => {
@@ -116,10 +119,6 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/system/tool_syntax_correction") => {
             include_str!("../../prompts/en/fragments/system/tool_syntax_correction.md.j2")
         }
-        ("en", "fragments/system/worker_time_context") => {
-            include_str!("../../prompts/en/fragments/system/worker_time_context.md.j2")
-        }
-
         // Agent Communication Fragments
         ("en", "fragments/org_context") => {
             include_str!("../../prompts/en/fragments/org_context.md.j2")
@@ -127,6 +126,10 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         // Coalesce Hint
         ("en", "fragments/coalesce_hint") => {
             include_str!("../../prompts/en/fragments/coalesce_hint.md.j2")
+        }
+        // Projects Context
+        ("en", "fragments/projects_context") => {
+            include_str!("../../prompts/en/fragments/projects_context.md.j2")
         }
 
         // Tool Descriptions
@@ -143,14 +146,30 @@ fn lookup(lang: &str, key: &str) -> &'static str {
             include_str!("../../prompts/en/tools/set_status_description.md.j2")
         }
         ("en", "tools/shell") => include_str!("../../prompts/en/tools/shell_description.md.j2"),
-        ("en", "tools/file") => include_str!("../../prompts/en/tools/file_description.md.j2"),
-        ("en", "tools/exec") => include_str!("../../prompts/en/tools/exec_description.md.j2"),
+        ("en", "tools/install_skill") => {
+            include_str!("../../prompts/en/tools/install_skill_description.md.j2")
+        }
+        ("en", "tools/file_read") => {
+            include_str!("../../prompts/en/tools/file_read_description.md.j2")
+        }
+        ("en", "tools/file_write") => {
+            include_str!("../../prompts/en/tools/file_write_description.md.j2")
+        }
+        ("en", "tools/file_edit") => {
+            include_str!("../../prompts/en/tools/file_edit_description.md.j2")
+        }
+        ("en", "tools/file_list") => {
+            include_str!("../../prompts/en/tools/file_list_description.md.j2")
+        }
         ("en", "tools/browser") => include_str!("../../prompts/en/tools/browser_description.md.j2"),
         ("en", "tools/web_search") => {
             include_str!("../../prompts/en/tools/web_search_description.md.j2")
         }
         ("en", "tools/memory_save") => {
             include_str!("../../prompts/en/tools/memory_save_description.md.j2")
+        }
+        ("en", "tools/memory_persistence_complete") => {
+            include_str!("../../prompts/en/tools/memory_persistence_complete_description.md.j2")
         }
         ("en", "tools/memory_recall") => {
             include_str!("../../prompts/en/tools/memory_recall_description.md.j2")
@@ -188,6 +207,39 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         }
         ("en", "tools/task_update") => {
             include_str!("../../prompts/en/tools/task_update_description.md.j2")
+        }
+        ("en", "tools/skills_search") => {
+            include_str!("../../prompts/en/tools/skills_search_description.md.j2")
+        }
+        ("en", "tools/spacebot_docs") => {
+            include_str!("../../prompts/en/tools/spacebot_docs_description.md.j2")
+        }
+        ("en", "tools/config_inspect") => {
+            include_str!("../../prompts/en/tools/config_inspect_description.md.j2")
+        }
+        ("en", "tools/factory_list_presets") => {
+            include_str!("../../prompts/en/tools/factory_list_presets_description.md.j2")
+        }
+        ("en", "tools/factory_load_preset") => {
+            include_str!("../../prompts/en/tools/factory_load_preset_description.md.j2")
+        }
+        ("en", "tools/factory_search_context") => {
+            include_str!("../../prompts/en/tools/factory_search_context_description.md.j2")
+        }
+        ("en", "tools/factory_create_agent") => {
+            include_str!("../../prompts/en/tools/factory_create_agent_description.md.j2")
+        }
+        ("en", "tools/factory_update_identity") => {
+            include_str!("../../prompts/en/tools/factory_update_identity_description.md.j2")
+        }
+        ("en", "tools/factory_update_config") => {
+            include_str!("../../prompts/en/tools/factory_update_config_description.md.j2")
+        }
+        ("en", "tools/project_manage") => {
+            include_str!("../../prompts/en/tools/project_manage_description.md.j2")
+        }
+        ("en", "tools/attachment_recall") => {
+            include_str!("../../prompts/en/tools/attachment_recall_description.md.j2")
         }
 
         // Fallback: unknown language or key -> try English

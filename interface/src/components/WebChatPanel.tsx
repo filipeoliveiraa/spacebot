@@ -1,42 +1,78 @@
-import { useEffect, useRef, useState } from "react";
-import { useWebChat } from "@/hooks/useWebChat";
-import type { ActiveWorker } from "@/hooks/useChannelLiveState";
-import { useLiveContext } from "@/hooks/useLiveContext";
-import { Markdown } from "@/components/Markdown";
+import {useEffect, useRef, useState} from "react";
+import {Link} from "@tanstack/react-router";
+import {useWebChat} from "@/hooks/useWebChat";
+import {isOpenCodeWorker, type ActiveWorker} from "@/hooks/useChannelLiveState";
+import {useLiveContext} from "@/hooks/useLiveContext";
+import {Markdown} from "@/components/Markdown";
 
 interface WebChatPanelProps {
 	agentId: string;
 }
 
-function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
+function ActiveWorkersPanel({
+	workers,
+	agentId,
+}: {
+	workers: ActiveWorker[];
+	agentId: string;
+}) {
 	if (workers.length === 0) return null;
 
+	// Use neutral chrome when all workers are opencode, amber when all builtin, mixed stays amber
+	const allOpenCode = workers.every(isOpenCodeWorker);
+	const borderColor = allOpenCode
+		? "border-zinc-500/25 bg-zinc-500/5"
+		: "border-amber-500/25 bg-amber-500/5";
+	const headerColor = allOpenCode ? "text-zinc-200" : "text-amber-200";
+	const dotColor = allOpenCode ? "bg-zinc-400" : "bg-amber-400";
+
 	return (
-		<div className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
-			<div className="mb-2 flex items-center gap-1.5 text-tiny text-amber-200">
-				<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+		<div className={`rounded-lg border px-3 py-2 ${borderColor}`}>
+			<div
+				className={`mb-2 flex items-center gap-1.5 text-tiny ${headerColor}`}
+			>
+				<div className={`h-1.5 w-1.5 animate-pulse rounded-full ${dotColor}`} />
 				<span>
 					{workers.length} active worker{workers.length !== 1 ? "s" : ""}
 				</span>
 			</div>
 			<div className="flex flex-col gap-1.5">
-				{workers.map((worker) => (
-					<div
-						key={worker.id}
-						className="flex min-w-0 items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny"
-					>
-						<span className="font-medium text-amber-300">Worker</span>
-						<span className="min-w-0 flex-1 truncate text-ink-dull">
-							{worker.task}
-						</span>
-						<span className="shrink-0 text-ink-faint">{worker.status}</span>
-						{worker.currentTool && (
-							<span className="max-w-40 shrink-0 truncate text-amber-400/80">
-								{worker.currentTool}
+				{workers.map((worker) => {
+					const oc = isOpenCodeWorker(worker);
+					return (
+						<Link
+							key={worker.id}
+							to="/agents/$agentId/workers"
+							params={{agentId}}
+							search={{worker: worker.id}}
+							className={`flex min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-tiny transition-colors ${
+								oc
+									? "bg-zinc-500/10 hover:bg-zinc-500/20"
+									: "bg-amber-500/10 hover:bg-amber-500/20"
+							}`}
+						>
+							<div
+								className={`h-1.5 w-1.5 animate-pulse rounded-full ${oc ? "bg-zinc-400" : "bg-amber-400"}`}
+							/>
+							<span
+								className={`font-medium ${oc ? "text-zinc-300" : "text-amber-300"}`}
+							>
+								Worker
 							</span>
-						)}
-					</div>
-				))}
+							<span className="min-w-0 flex-1 truncate text-ink-dull">
+								{worker.task}
+							</span>
+							<span className="shrink-0 text-ink-faint">{worker.status}</span>
+							{worker.currentTool && (
+								<span
+									className={`max-w-40 shrink-0 truncate ${oc ? "text-zinc-400/80" : "text-amber-400/80"}`}
+								>
+									{worker.currentTool}
+								</span>
+							)}
+						</Link>
+					);
+				})}
 			</div>
 		</div>
 	);
@@ -106,14 +142,12 @@ function FloatingChatInput({
 							onChange={(event) => onChange(event.target.value)}
 							onKeyDown={handleKeyDown}
 							placeholder={
-								disabled
-									? "Waiting for response..."
-									: `Message ${agentId}...`
+								disabled ? "Waiting for response..." : `Message ${agentId}...`
 							}
 							disabled={disabled}
 							rows={1}
 							className="flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-ink placeholder:text-ink-faint/60 focus:outline-none disabled:opacity-40"
-							style={{ maxHeight: "200px" }}
+							style={{maxHeight: "200px"}}
 						/>
 						<button
 							type="button"
@@ -141,9 +175,9 @@ function FloatingChatInput({
 	);
 }
 
-export function WebChatPanel({ agentId }: WebChatPanelProps) {
-	const { sessionId, isSending, error, sendMessage } = useWebChat(agentId);
-	const { liveStates } = useLiveContext();
+export function WebChatPanel({agentId}: WebChatPanelProps) {
+	const {sessionId, isSending, error, sendMessage} = useWebChat(agentId);
+	const {liveStates} = useLiveContext();
 	const [input, setInput] = useState("");
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -155,7 +189,7 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 
 	// Auto-scroll on new messages or typing state changes
 	useEffect(() => {
-		messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+		messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
 	}, [timeline.length, isTyping, activeWorkers.length]);
 
 	const handleSubmit = () => {
@@ -168,11 +202,11 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 	return (
 		<div className="relative flex h-full w-full flex-col">
 			{/* Messages */}
-			<div className="flex-1 overflow-y-auto">
+			<div className="flex-1 overflow-x-hidden overflow-y-auto">
 				<div className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-6 pb-32">
 					{hasActiveWorkers && (
 						<div className="sticky top-0 z-10 bg-app/90 pb-2 pt-2 backdrop-blur-sm">
-							<ActiveWorkersPanel workers={activeWorkers} />
+							<ActiveWorkersPanel workers={activeWorkers} agentId={agentId} />
 						</div>
 					)}
 
@@ -190,8 +224,10 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 							<div key={item.id}>
 								{item.role === "user" ? (
 									<div className="flex justify-end">
-										<div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent/10 px-4 py-2.5">
-											<p className="text-sm text-ink">{item.content}</p>
+										<div className="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-br-md bg-app-hover/30 px-4 py-2.5">
+											<p className="text-sm text-ink break-all whitespace-pre-wrap">
+												{item.content}
+											</p>
 										</div>
 									</div>
 								) : (

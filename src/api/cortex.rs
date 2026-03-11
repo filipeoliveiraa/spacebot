@@ -1,7 +1,9 @@
 use super::state::ApiState;
 
 use crate::agent::cortex::{CortexEvent, CortexLogger};
-use crate::agent::cortex_chat::{CortexChatEvent, CortexChatMessage, CortexChatStore};
+use crate::agent::cortex_chat::{
+    CortexChatEvent, CortexChatMessage, CortexChatSendError, CortexChatStore, CortexChatThread,
+};
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -58,6 +60,13 @@ pub(super) struct CortexEventsQuery {
 
 fn default_cortex_events_limit() -> i64 {
     50
+}
+
+fn map_cortex_chat_send_error(error: &CortexChatSendError) -> StatusCode {
+    match error {
+        CortexChatSendError::Busy => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 /// Load persisted cortex chat history for a thread.
@@ -122,8 +131,11 @@ pub(super) async fn cortex_chat_send(
         .send_message_with_events(&thread_id, &message, channel_ref)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "failed to start cortex chat send");
-            StatusCode::INTERNAL_SERVER_ERROR
+            let status = map_cortex_chat_send_error(&error);
+            if status == StatusCode::INTERNAL_SERVER_ERROR {
+                tracing::warn!(%error, "failed to start cortex chat send");
+            }
+            status
         })?;
 
     let stream = async_stream::stream! {
@@ -148,6 +160,62 @@ pub(super) async fn cortex_chat_send(
     };
 
     Ok(Sse::new(stream))
+}
+
+// -- Thread management --
+
+#[derive(Serialize)]
+pub(super) struct CortexChatThreadsResponse {
+    threads: Vec<CortexChatThread>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CortexChatThreadsQuery {
+    agent_id: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CortexChatDeleteThreadRequest {
+    agent_id: String,
+    thread_id: String,
+}
+
+/// List all cortex chat threads for an agent, newest first.
+pub(super) async fn cortex_chat_threads(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<CortexChatThreadsQuery>,
+) -> Result<Json<CortexChatThreadsResponse>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = CortexChatStore::new(pool.clone());
+
+    let threads = store.list_threads().await.map_err(|error| {
+        tracing::warn!(%error, agent_id = %query.agent_id, "failed to list cortex chat threads");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(CortexChatThreadsResponse { threads }))
+}
+
+/// Delete a cortex chat thread and all its messages.
+pub(super) async fn cortex_chat_delete_thread(
+    State(state): State<Arc<ApiState>>,
+    axum::Json(request): axum::Json<CortexChatDeleteThreadRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = CortexChatStore::new(pool.clone());
+
+    let deleted = store.delete_thread(&request.thread_id).await.map_err(|error| {
+        tracing::warn!(%error, agent_id = %request.agent_id, thread_id = %request.thread_id, "failed to delete cortex chat thread");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if deleted == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// List cortex events for an agent with optional type filter, newest first.
@@ -176,4 +244,27 @@ pub(super) async fn cortex_events(
     })?;
 
     Ok(Json(CortexEventsResponse { events, total }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_cortex_chat_send_error;
+    use crate::agent::cortex_chat::CortexChatSendError;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn maps_busy_send_error_to_conflict() {
+        assert_eq!(
+            map_cortex_chat_send_error(&CortexChatSendError::Busy),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn maps_database_send_error_to_internal_server_error() {
+        assert_eq!(
+            map_cortex_chat_send_error(&CortexChatSendError::Database(sqlx::Error::RowNotFound)),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }

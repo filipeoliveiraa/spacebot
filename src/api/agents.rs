@@ -66,6 +66,7 @@ struct HeatmapCell {
 struct CronJobInfo {
     id: String,
     prompt: String,
+    cron_expr: Option<String>,
     interval_secs: u64,
     delivery_target: String,
     enabled: bool,
@@ -103,7 +104,7 @@ pub(super) struct AgentProfileResponse {
 pub(super) struct IdentityResponse {
     soul: Option<String>,
     identity: Option<String>,
-    user: Option<String>,
+    role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -116,7 +117,7 @@ pub(super) struct IdentityUpdateRequest {
     agent_id: String,
     soul: Option<String>,
     identity: Option<String>,
-    user: Option<String>,
+    role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -125,10 +126,17 @@ pub(super) struct AgentOverviewQuery {
 }
 
 #[derive(Deserialize)]
-pub(super) struct CreateAgentRequest {
-    agent_id: String,
-    display_name: Option<String>,
-    role: Option<String>,
+pub struct CreateAgentRequest {
+    pub agent_id: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+}
+
+/// Result from internal agent creation logic.
+pub struct CreateAgentResult {
+    pub success: bool,
+    pub agent_id: String,
+    pub message: String,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +144,8 @@ pub(super) struct UpdateAgentRequest {
     agent_id: String,
     display_name: Option<String>,
     role: Option<String>,
+    gradient_start: Option<String>,
+    gradient_end: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -402,8 +412,11 @@ pub(super) async fn trigger_warmup(
         let agent_id = agent_id.clone();
         let task_store_registry = state.task_store_registry.clone();
         let injection_tx = state.injection_tx.clone();
+        let humans = (**state.agent_humans.load()).clone();
         tokio::spawn(async move {
-            let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
+            let (event_tx, memory_event_tx) = crate::create_process_event_buses();
+            let project_store =
+                std::sync::Arc::new(crate::projects::ProjectStore::new(sqlite_pool.clone()));
             let deps = crate::AgentDeps {
                 agent_id: Arc::from(agent_id.as_str()),
                 memory_search,
@@ -412,13 +425,19 @@ pub(super) async fn trigger_warmup(
                 cron_tool: None,
                 runtime_config,
                 event_tx,
+                memory_event_tx,
                 sqlite_pool: sqlite_pool.clone(),
                 messaging_manager: None,
                 sandbox,
                 task_store,
+                project_store,
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
+                humans: Arc::new(arc_swap::ArcSwap::from_pointee(humans)),
                 task_store_registry,
+                process_control_registry: Arc::new(
+                    crate::agent::process_control::ProcessControlRegistry::new(),
+                ),
                 injection_tx,
             };
             let logger = CortexLogger::new(sqlite_pool);
@@ -437,51 +456,81 @@ pub(super) async fn trigger_warmup(
 pub(super) async fn create_agent(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateAgentRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> (StatusCode, Json<serde_json::Value>) {
+    match create_agent_internal(&state, request).await {
+        Ok(result) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "success": result.success,
+                "agent_id": result.agent_id,
+                "message": result.message
+            })),
+        ),
+        Err(message) => {
+            let status = if message.contains("already exists") {
+                StatusCode::CONFLICT
+            } else if message.contains("cannot be empty") || message.contains("agent limit") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(serde_json::json!({
+                    "success": false,
+                    "message": message
+                })),
+            )
+        }
+    }
+}
+
+/// Internal agent creation logic shared between the API handler and factory tools.
+pub async fn create_agent_internal(
+    state: &Arc<ApiState>,
+    request: CreateAgentRequest,
+) -> Result<CreateAgentResult, String> {
     if let Some(limit) = hosted_agent_limit() {
         let existing = state.agent_configs.load();
         if existing.len() >= limit {
-            return Ok(Json(serde_json::json!({
-                "success": false,
-                "message": format!("agent limit reached for this instance: up to {limit} agent{}", if limit == 1 { "" } else { "s" })
-            })));
+            return Err(format!(
+                "agent limit reached for this instance: up to {limit} agent{}",
+                if limit == 1 { "" } else { "s" }
+            ));
         }
     }
 
     let agent_id = request.agent_id.trim().to_string();
     if agent_id.is_empty() {
-        return Ok(Json(serde_json::json!({
-            "success": false,
-            "message": "Agent ID cannot be empty"
-        })));
+        return Err("Agent ID cannot be empty".into());
     }
 
     {
         let existing = state.agent_configs.load();
         if existing.iter().any(|a| a.id == agent_id) {
-            return Ok(Json(serde_json::json!({
-                "success": false,
-                "message": format!("Agent '{agent_id}' already exists")
-            })));
+            return Err(format!("Agent '{agent_id}' already exists"));
         }
     }
 
     let config_path = state.config_path.read().await.clone();
     let instance_dir = (**state.instance_dir.load()).clone();
 
+    // Acquire the config write mutex to prevent concurrent read-modify-write races.
+    let _config_guard = state.config_write_mutex.lock().await;
+
     let content = if config_path.exists() {
         tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "failed to read config.toml");
-                StatusCode::INTERNAL_SERVER_ERROR
+                format!("failed to read config.toml: {error}")
             })?
     } else {
         String::new()
     };
     let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
         tracing::warn!(%error, "failed to parse config.toml");
-        StatusCode::INTERNAL_SERVER_ERROR
+        format!("failed to parse config.toml: {error}")
     })?;
 
     if doc.get("agents").is_none() {
@@ -489,7 +538,7 @@ pub(super) async fn create_agent(
     }
     let agents_array = doc["agents"]
         .as_array_of_tables_mut()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .ok_or_else(|| "agents is not an array of tables in config.toml".to_string())?;
 
     let mut new_table = toml_edit::Table::new();
     new_table["id"] = toml_edit::value(&agent_id);
@@ -509,8 +558,11 @@ pub(super) async fn create_agent(
         .await
         .map_err(|error| {
             tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to write config.toml: {error}")
         })?;
+
+    // Release the config write mutex — remaining work doesn't touch config.toml.
+    drop(_config_guard);
 
     // Read defaults directly from the config we just wrote to disk rather than
     // relying on the cached `defaults_config` which may be stale (e.g. if a
@@ -539,7 +591,7 @@ pub(super) async fn create_agent(
         cached_defaults = state.defaults_config.read().await;
         cached_defaults.as_ref().ok_or_else(|| {
             tracing::error!("defaults config not available");
-            StatusCode::INTERNAL_SERVER_ERROR
+            "defaults config not available".to_string()
         })?
     };
 
@@ -548,6 +600,8 @@ pub(super) async fn create_agent(
         default: false,
         display_name: request.display_name.clone().filter(|s| !s.is_empty()),
         role: request.role.clone().filter(|s| !s.is_empty()),
+        gradient_start: None,
+        gradient_end: None,
         workspace: None,
         routing: None,
         max_concurrent_branches: None,
@@ -562,11 +616,13 @@ pub(super) async fn create_agent(
         cortex: None,
         warmup: None,
         browser: None,
+        channel: None,
         mcp: None,
         brave_search_key: None,
         cron_timezone: None,
         user_timezone: None,
         sandbox: None,
+        projects: None,
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
@@ -580,7 +636,7 @@ pub(super) async fn create_agent(
     ] {
         std::fs::create_dir_all(dir).map_err(|error| {
             tracing::error!(%error, dir = %dir.display(), "failed to create agent directory");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to create directory {}: {error}", dir.display())
         })?;
     }
 
@@ -588,14 +644,14 @@ pub(super) async fn create_agent(
         .await
         .map_err(|error| {
             tracing::error!(%error, agent_id = %agent_id, "failed to connect agent databases");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to connect databases: {error}")
         })?;
 
     let settings_path = agent_config.data_dir.join("settings.redb");
     let settings_store = std::sync::Arc::new(
         crate::settings::SettingsStore::new(&settings_path).map_err(|error| {
             tracing::error!(%error, agent_id = %agent_id, "failed to init settings store");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to init settings store: {error}")
         })?,
     );
 
@@ -605,7 +661,7 @@ pub(super) async fn create_agent(
             .as_ref()
             .ok_or_else(|| {
                 tracing::error!("embedding model not available");
-                StatusCode::INTERNAL_SERVER_ERROR
+                "embedding model not available".to_string()
             })?
             .clone()
     };
@@ -615,7 +671,7 @@ pub(super) async fn create_agent(
         .await
         .map_err(|error| {
             tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to init embeddings: {error}")
         })?;
 
     if let Err(error) = embedding_table.ensure_fts_index().await {
@@ -629,16 +685,16 @@ pub(super) async fn create_agent(
     ));
     let task_store = std::sync::Arc::new(crate::tasks::TaskStore::new(db.sqlite.clone()));
 
-    let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let (event_tx, memory_event_tx) = crate::create_process_event_buses();
     let arc_agent_id: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
 
-    crate::identity::scaffold_identity_files(&agent_config.workspace)
+    crate::identity::scaffold_identity_files(&agent_config.identity_dir)
         .await
         .map_err(|error| {
             tracing::error!(%error, agent_id = %agent_id, "failed to scaffold identity files");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to scaffold identity files: {error}")
         })?;
-    let identity = crate::identity::Identity::load(&agent_config.workspace).await;
+    let identity = crate::identity::Identity::load(&agent_config.identity_dir).await;
 
     let skills =
         crate::skills::SkillSet::load(&instance_dir.join("skills"), &agent_config.skills_dir())
@@ -650,7 +706,7 @@ pub(super) async fn create_agent(
             .as_ref()
             .ok_or_else(|| {
                 tracing::error!("prompt engine not available");
-                StatusCode::INTERNAL_SERVER_ERROR
+                "prompt engine not available".to_string()
             })?
             .clone()
     };
@@ -663,7 +719,7 @@ pub(super) async fn create_agent(
             .as_ref()
             .ok_or_else(|| {
                 tracing::error!("defaults config not available");
-                StatusCode::INTERNAL_SERVER_ERROR
+                "defaults config not available".to_string()
             })?
             .clone()
     };
@@ -676,7 +732,8 @@ pub(super) async fn create_agent(
         identity,
         skills,
     ));
-    runtime_config.set_settings(settings_store.clone());
+    let explicit_listen_only = raw_config.channel.map(|channel| channel.listen_only_mode);
+    runtime_config.set_settings(settings_store.clone(), explicit_listen_only);
 
     let llm_manager = {
         let guard = state.llm_manager.read().await;
@@ -684,7 +741,7 @@ pub(super) async fn create_agent(
             .as_ref()
             .ok_or_else(|| {
                 tracing::error!("LLM manager not available");
-                StatusCode::INTERNAL_SERVER_ERROR
+                "LLM manager not available".to_string()
             })?
             .clone()
     };
@@ -702,15 +759,22 @@ pub(super) async fn create_agent(
         .await,
     );
 
+    let project_store = std::sync::Arc::new(crate::projects::ProjectStore::new(db.sqlite.clone()));
+
+    // Inject active project root paths into the sandbox allowlist.
+    crate::projects::refresh_sandbox_project_paths(&project_store, &arc_agent_id, &sandbox).await;
+
     let deps = crate::AgentDeps {
         agent_id: arc_agent_id.clone(),
         memory_search: memory_search.clone(),
         llm_manager,
         mcp_manager: mcp_manager.clone(),
         task_store: task_store.clone(),
+        project_store: project_store.clone(),
         cron_tool: None,
         runtime_config: runtime_config.clone(),
         event_tx: event_tx.clone(),
+        memory_event_tx: memory_event_tx.clone(),
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: {
             let guard = state.messaging_manager.read().await;
@@ -721,6 +785,9 @@ pub(super) async fn create_agent(
             (**state.agent_links.load()).clone(),
         )),
         task_store_registry: state.task_store_registry.clone(),
+        process_control_registry: Arc::new(
+            crate::agent::process_control::ProcessControlRegistry::new(),
+        ),
         injection_tx: state.injection_tx.clone(),
         agent_names: {
             let configs = state.agent_configs.load();
@@ -742,6 +809,9 @@ pub(super) async fn create_agent(
             });
             Arc::new(names)
         },
+        humans: Arc::new(arc_swap::ArcSwap::from_pointee(
+            (**state.agent_humans.load()).clone(),
+        )),
     };
 
     let event_rx = event_tx.subscribe();
@@ -772,10 +842,13 @@ pub(super) async fn create_agent(
         crate::conversation::history::ConversationLogger::new(db.sqlite.clone());
     let channel_store = crate::conversation::ChannelStore::new(db.sqlite.clone());
     let run_logger = crate::conversation::ProcessRunLogger::new(db.sqlite.clone());
+    let cortex_ctx = crate::agent::cortex_chat::CortexChatSession::create_context();
     let cortex_tool_server = crate::tools::create_cortex_chat_tool_server(
         deps.agent_id.clone(),
+        deps.clone(),
         deps.task_store.clone(),
         memory_search.clone(),
+        deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
         run_logger,
@@ -784,18 +857,30 @@ pub(super) async fn create_agent(
         brave_search_key,
         runtime_config.workspace_dir.clone(),
         sandbox.clone(),
+        runtime_config.clone(),
+        state.clone(),
+        Some(cortex_ctx.clone()),
     );
+    // Add factory tools to the cortex chat tool server
+    if let Err(error) =
+        crate::tools::add_factory_tools(&cortex_tool_server, state.clone(), memory_search.clone())
+            .await
+    {
+        tracing::warn!(%error, agent_id = %agent_id, "failed to add factory tools to cortex chat");
+    }
+
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
     let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
         deps.clone(),
         cortex_tool_server,
         cortex_store,
-    );
+        cortex_ctx,
+    )
+    .with_factory(true);
 
     let cortex_logger = crate::agent::cortex::CortexLogger::new(db.sqlite.clone());
     let _warmup_loop = crate::agent::cortex::spawn_warmup_loop(deps.clone(), cortex_logger.clone());
-    let _bulletin_loop =
-        crate::agent::cortex::spawn_bulletin_loop(deps.clone(), cortex_logger.clone());
+    let _cortex_loop = crate::agent::cortex::spawn_cortex_loop(deps.clone(), cortex_logger.clone());
     let _association_loop =
         crate::agent::cortex::spawn_association_loop(deps.clone(), cortex_logger);
     crate::agent::cortex::spawn_ready_task_loop(
@@ -846,6 +931,16 @@ pub(super) async fn create_agent(
             .agent_workspaces
             .store(std::sync::Arc::new(workspaces));
 
+        let mut identity_dirs = (**state.agent_identity_dirs.load()).clone();
+        identity_dirs.insert(agent_id.clone(), agent_config.identity_dir.clone());
+        state
+            .agent_identity_dirs
+            .store(std::sync::Arc::new(identity_dirs));
+
+        let mut data_dirs = (**state.agent_data_dirs.load()).clone();
+        data_dirs.insert(agent_id.clone(), agent_config.data_dir.clone());
+        state.agent_data_dirs.store(std::sync::Arc::new(data_dirs));
+
         let mut configs = (**state.runtime_configs.load()).clone();
         configs.insert(agent_id.clone(), runtime_config);
         state.runtime_configs.store(std::sync::Arc::new(configs));
@@ -858,11 +953,19 @@ pub(super) async fn create_agent(
         sandboxes.insert(agent_id.clone(), sandbox);
         state.sandboxes.store(std::sync::Arc::new(sandboxes));
 
+        let mut project_stores_map = (**state.project_stores.load()).clone();
+        project_stores_map.insert(agent_id.clone(), project_store);
+        state
+            .project_stores
+            .store(std::sync::Arc::new(project_stores_map));
+
         let mut agent_infos = (**state.agent_configs.load()).clone();
         agent_infos.push(AgentInfo {
             id: agent_config.id.clone(),
             display_name: agent_config.display_name.clone(),
             role: agent_config.role.clone(),
+            gradient_start: agent_config.gradient_start.clone(),
+            gradient_end: agent_config.gradient_end.clone(),
             workspace: agent_config.workspace.clone(),
             context_window: agent_config.context_window,
             max_turns: agent_config.max_turns,
@@ -882,7 +985,9 @@ pub(super) async fn create_agent(
             .store(std::sync::Arc::new(cron_schedulers));
 
         let mut sessions = (**state.cortex_chat_sessions.load()).clone();
-        sessions.insert(agent_id.clone(), std::sync::Arc::new(cortex_session));
+        let cortex_session = std::sync::Arc::new(cortex_session);
+        cortex_session.start_event_loop();
+        sessions.insert(agent_id.clone(), cortex_session);
         state
             .cortex_chat_sessions
             .store(std::sync::Arc::new(sessions));
@@ -890,11 +995,11 @@ pub(super) async fn create_agent(
 
     tracing::info!(agent_id = %agent_id, "agent created and initialized via API");
 
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "agent_id": agent_id,
-        "message": format!("Agent '{agent_id}' created and running")
-    })))
+    Ok(CreateAgentResult {
+        success: true,
+        agent_id: agent_id.clone(),
+        message: format!("Agent '{agent_id}' created and running"),
+    })
 }
 
 /// Update an agent's display_name and role in config.toml.
@@ -917,6 +1022,10 @@ pub(super) async fn update_agent(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let config_path = state.config_path.read().await.clone();
+
+    // Acquire the config write mutex to prevent concurrent read-modify-write races.
+    let _config_guard = state.config_write_mutex.lock().await;
+
     let content = tokio::fs::read_to_string(&config_path)
         .await
         .map_err(|error| {
@@ -949,6 +1058,20 @@ pub(super) async fn update_agent(
                         table["role"] = toml_edit::value(role.as_str());
                     }
                 }
+                if let Some(gradient_start) = &request.gradient_start {
+                    if gradient_start.is_empty() {
+                        table.remove("gradient_start");
+                    } else {
+                        table["gradient_start"] = toml_edit::value(gradient_start.as_str());
+                    }
+                }
+                if let Some(gradient_end) = &request.gradient_end {
+                    if gradient_end.is_empty() {
+                        table.remove("gradient_end");
+                    } else {
+                        table["gradient_end"] = toml_edit::value(gradient_end.as_str());
+                    }
+                }
                 break;
             }
         }
@@ -960,6 +1083,8 @@ pub(super) async fn update_agent(
             tracing::warn!(%error, "failed to write config.toml");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    drop(_config_guard);
 
     let mut configs = (**existing).clone();
     let info = &mut configs[index];
@@ -975,6 +1100,20 @@ pub(super) async fn update_agent(
             None
         } else {
             Some(role.clone())
+        };
+    }
+    if let Some(gradient_start) = &request.gradient_start {
+        info.gradient_start = if gradient_start.is_empty() {
+            None
+        } else {
+            Some(gradient_start.clone())
+        };
+    }
+    if let Some(gradient_end) = &request.gradient_end {
+        info.gradient_end = if gradient_end.is_empty() {
+            None
+        } else {
+            Some(gradient_end.clone())
         };
     }
     state.set_agent_configs(configs);
@@ -1015,6 +1154,9 @@ pub(super) async fn delete_agent(
     // Remove the [[agents]] entry from config.toml
     let config_path = state.config_path.read().await.clone();
     if config_path.exists() {
+        // Acquire the config write mutex to prevent concurrent read-modify-write races.
+        let _config_guard = state.config_write_mutex.lock().await;
+
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|error| {
@@ -1083,6 +1225,16 @@ pub(super) async fn delete_agent(
             .agent_workspaces
             .store(std::sync::Arc::new(workspaces));
 
+        let mut identity_dirs = (**state.agent_identity_dirs.load()).clone();
+        identity_dirs.remove(&agent_id);
+        state
+            .agent_identity_dirs
+            .store(std::sync::Arc::new(identity_dirs));
+
+        let mut data_dirs = (**state.agent_data_dirs.load()).clone();
+        data_dirs.remove(&agent_id);
+        state.agent_data_dirs.store(std::sync::Arc::new(data_dirs));
+
         let mut configs = (**state.runtime_configs.load()).clone();
         configs.remove(&agent_id);
         state.runtime_configs.store(std::sync::Arc::new(configs));
@@ -1110,6 +1262,12 @@ pub(super) async fn delete_agent(
         state
             .cortex_chat_sessions
             .store(std::sync::Arc::new(sessions));
+
+        let mut project_stores_map = (**state.project_stores.load()).clone();
+        project_stores_map.remove(&agent_id);
+        state
+            .project_stores
+            .store(std::sync::Arc::new(project_stores_map));
     }
 
     // Signal the main event loop to remove the agent
@@ -1157,7 +1315,7 @@ pub(super) async fn agent_overview(
     let channel_count = channels.len();
 
     let cron_rows = sqlx::query(
-        "SELECT id, prompt, interval_secs, delivery_target, active_start_hour, active_end_hour, enabled, run_once, timeout_secs FROM cron_jobs ORDER BY created_at ASC",
+        "SELECT id, prompt, cron_expr, interval_secs, delivery_target, active_start_hour, active_end_hour, enabled, run_once, timeout_secs FROM cron_jobs ORDER BY created_at ASC",
     )
     .fetch_all(pool)
     .await
@@ -1171,6 +1329,7 @@ pub(super) async fn agent_overview(
             CronJobInfo {
                 id: row.get("id"),
                 prompt: row.get("prompt"),
+                cron_expr: row.try_get::<Option<String>, _>("cron_expr").ok().flatten(),
                 interval_secs: row.get::<i64, _>("interval_secs") as u64,
                 delivery_target: row.get("delivery_target"),
                 enabled: row.get::<i64, _>("enabled") != 0,
@@ -1403,22 +1562,22 @@ pub(super) async fn get_agent_profile(
     Ok(Json(AgentProfileResponse { profile }))
 }
 
-/// Get identity files (SOUL.md, IDENTITY.md, USER.md) for an agent.
+/// Get identity files (SOUL.md, IDENTITY.md, ROLE.md) for an agent.
 pub(super) async fn get_identity(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<IdentityQuery>,
 ) -> Result<Json<IdentityResponse>, StatusCode> {
-    let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces
+    let identity_dirs = state.agent_identity_dirs.load();
+    let identity_dir = identity_dirs
         .get(&query.agent_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let identity = crate::identity::Identity::load(workspace).await;
+    let identity = crate::identity::Identity::load(identity_dir).await;
 
     Ok(Json(IdentityResponse {
         soul: identity.soul,
         identity: identity.identity,
-        user: identity.user,
+        role: identity.role,
     }))
 }
 
@@ -1428,13 +1587,13 @@ pub(super) async fn update_identity(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<IdentityUpdateRequest>,
 ) -> Result<Json<IdentityResponse>, StatusCode> {
-    let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces
+    let identity_dirs = state.agent_identity_dirs.load();
+    let identity_dir = identity_dirs
         .get(&request.agent_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
     if let Some(soul) = &request.soul {
-        tokio::fs::write(workspace.join("SOUL.md"), soul)
+        tokio::fs::write(identity_dir.join("SOUL.md"), soul)
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "failed to write SOUL.md");
@@ -1443,7 +1602,7 @@ pub(super) async fn update_identity(
     }
 
     if let Some(identity) = &request.identity {
-        tokio::fs::write(workspace.join("IDENTITY.md"), identity)
+        tokio::fs::write(identity_dir.join("IDENTITY.md"), identity)
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "failed to write IDENTITY.md");
@@ -1451,21 +1610,21 @@ pub(super) async fn update_identity(
             })?;
     }
 
-    if let Some(user) = &request.user {
-        tokio::fs::write(workspace.join("USER.md"), user)
+    if let Some(role) = &request.role {
+        tokio::fs::write(identity_dir.join("ROLE.md"), role)
             .await
             .map_err(|error| {
-                tracing::warn!(%error, "failed to write USER.md");
+                tracing::warn!(%error, "failed to write ROLE.md");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
     }
 
-    let updated = crate::identity::Identity::load(workspace).await;
+    let updated = crate::identity::Identity::load(identity_dir).await;
 
     Ok(Json(IdentityResponse {
         soul: updated.soul,
         identity: updated.identity,
-        user: updated.user,
+        role: updated.role,
     }))
 }
 
@@ -1650,5 +1809,144 @@ mod tests {
         .expect("expected warmup target acceptance");
 
         assert_eq!(accepted, vec![String::from("main")]);
+    }
+}
+
+// -- Avatar upload / serve / delete --
+
+#[derive(Deserialize)]
+pub(super) struct AvatarQuery {
+    agent_id: String,
+}
+
+/// Serve the agent's avatar image.
+pub(super) async fn get_avatar(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AvatarQuery>,
+) -> Result<axum::response::Response, StatusCode> {
+    let data_dir = state
+        .agent_data_dirs
+        .load()
+        .get(&query.agent_id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let avatar_path = find_avatar(&data_dir).await.ok_or(StatusCode::NOT_FOUND)?;
+    let bytes = tokio::fs::read(&avatar_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let mime = mime_guess::from_path(&avatar_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=3600".into(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+use axum::response::IntoResponse;
+
+/// Upload (or replace) the agent's avatar image.
+pub(super) async fn upload_avatar(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AvatarQuery>,
+    request: axum::extract::Request,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let data_dir = state
+        .agent_data_dirs
+        .load()
+        .get(&query.agent_id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let content_type = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let ext = match content_type.as_str() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": "Unsupported image type. Use PNG, JPEG, GIF, WebP, or SVG."
+            })));
+        }
+    };
+
+    let body_bytes = axum::body::to_bytes(request.into_body(), 5 * 1024 * 1024)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+
+    // Remove any existing avatar files.
+    remove_existing_avatars(&data_dir).await;
+
+    let avatar_path = data_dir.join(format!("avatar.{ext}"));
+    tokio::fs::write(&avatar_path, &body_bytes)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to write avatar");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::info!(agent_id = %query.agent_id, path = %avatar_path.display(), "avatar uploaded");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "path": avatar_path.display().to_string()
+    })))
+}
+
+/// Delete the agent's avatar image.
+pub(super) async fn delete_avatar(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AvatarQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let data_dir = state
+        .agent_data_dirs
+        .load()
+        .get(&query.agent_id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    remove_existing_avatars(&data_dir).await;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Avatar removed"
+    })))
+}
+
+/// Find the first avatar.* file in the data dir.
+async fn find_avatar(data_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    for ext in &["png", "jpg", "jpeg", "gif", "webp", "svg"] {
+        let path = data_dir.join(format!("avatar.{ext}"));
+        if tokio::fs::metadata(&path).await.is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Remove all avatar.* files from the data dir.
+async fn remove_existing_avatars(data_dir: &std::path::Path) {
+    for ext in &["png", "jpg", "jpeg", "gif", "webp", "svg"] {
+        let path = data_dir.join(format!("avatar.{ext}"));
+        let _ = tokio::fs::remove_file(&path).await;
     }
 }

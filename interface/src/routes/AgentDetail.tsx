@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api, type CortexEvent, type CronJobInfo, MEMORY_TYPES } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
-import { formatTimeAgo, formatDuration } from "@/lib/format";
+import { formatTimeAgo, formatCronSchedule } from "@/lib/format";
 import { DeleteAgentDialog } from "@/components/DeleteAgentDialog";
 import {
 	ResponsiveContainer,
@@ -650,15 +650,15 @@ function IdentitySection({
 	identity,
 }: {
 	agentId: string;
-	identity: { soul: string | null; identity: string | null; user: string | null };
+	identity: { soul: string | null; identity: string | null; role: string | null };
 }) {
-	const hasContent = identity.soul || identity.identity || identity.user;
+	const hasContent = identity.soul || identity.identity || identity.role;
 	if (!hasContent) return null;
 
 	const files = [
 		{ label: "SOUL.md", tab: "soul", content: identity.soul },
 		{ label: "IDENTITY.md", tab: "identity", content: identity.identity },
-		{ label: "USER.md", tab: "user", content: identity.user },
+		{ label: "ROLE.md", tab: "role", content: identity.role },
 	].filter((f) => f.content && f.content.trim().length > 0 && !f.content.startsWith("<!--"));
 
 	if (files.length === 0) return null;
@@ -718,12 +718,12 @@ function CronSection({ agentId, jobs }: { agentId: string; jobs: CronJobInfo[] }
 						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull" title={job.prompt}>
 							{job.prompt}
 						</span>
-						<span className="text-tiny tabular-nums text-ink-faint">
-							every {formatDuration(job.interval_secs)}
-						</span>
+						<code className="rounded bg-app-lightBox/60 px-1.5 py-0.5 font-mono text-tiny text-ink-faint">
+							{formatCronSchedule(job.cron_expr, job.interval_secs)}
+						</code>
 						{job.active_hours && (
 							<span className="text-tiny text-ink-faint">
-								{job.active_hours[0]}:00–{job.active_hours[1]}:00
+								{String(job.active_hours[0]).padStart(2, "0")}:00-{String(job.active_hours[1]).padStart(2, "0")}:00
 							</span>
 						)}
 						<span className="text-tiny text-ink-faint">{job.delivery_target}</span>

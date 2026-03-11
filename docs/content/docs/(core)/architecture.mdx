@@ -83,7 +83,12 @@ For detailed coverage of each process type, see [Agents](/docs/agents), [Compact
 
 ## Inter-Process Communication
 
-All processes within an agent communicate through a `broadcast::channel<ProcessEvent>` -- a multi-producer, multi-consumer event bus. The channel, all branches, and all workers share the same bus.
+Each agent uses two `broadcast::channel<ProcessEvent>` buses:
+
+- `event_tx` -- control/lifecycle events shared by channel, branches, workers, compactor, and UI streams
+- `memory_event_tx` -- memory-save telemetry consumed by the cortex (`MemorySaved` events only)
+
+This split keeps high-volume memory writes off the control bus so channel control events are less likely to lag under load.
 
 ### Event Types
 
@@ -96,7 +101,7 @@ All processes within an agent communicate through a `broadcast::channel<ProcessE
 | `WorkerComplete` | Worker | Channel | Task done, retrigger |
 | `ToolStarted` | Hook | Channel, UI | Tool call in progress |
 | `ToolCompleted` | Hook | Channel, UI | Tool call finished |
-| `MemorySaved` | Branch, Cortex | UI | New memory created |
+| `MemorySaved` | Branch, Cortex | Cortex | New memory telemetry for signal buffer |
 | `CompactionTriggered` | Compactor | Channel | Context compacted |
 | `StatusUpdate` | Various | UI (SSE) | Typing indicators, lifecycle |
 | `TaskUpdated` | Branch, Worker | UI | Task board change |
@@ -282,6 +287,8 @@ Two hook implementations control process behavior:
 
 Hooks return `Continue`, `Terminate`, or `Skip` after each LLM turn, giving the system fine-grained control over process lifecycle.
 
+For profile synthesis, cortex uses Rig structured output (`prompt_typed`) so profile fields are schema-validated instead of parsed from free-form fenced JSON.
+
 ### Max Turns
 
 Rig defaults to 0 (single call). Spacebot sets explicit limits per process type:
@@ -405,7 +412,7 @@ src/
 
 **The compactor is not an LLM.** It's a programmatic monitor that watches a number and spawns workers. The LLM work happens in the workers it spawns.
 
-**Prompts are files.** System prompts live in `prompts/` as Jinja2 templates, not as string constants in Rust code. Identity files (SOUL.md, IDENTITY.md, USER.md, ROLE.md) are loaded from the agent's workspace directory.
+**Prompts are files.** System prompts live in `prompts/` as Jinja2 templates, not as string constants in Rust code. Identity files (SOUL.md, IDENTITY.md, ROLE.md) live in the agent root directory — outside the workspace sandbox — so worker file tools cannot access them.
 
 **Three databases, three purposes.** SQLite for relational queries, LanceDB for vector search, redb for key-value config. Each doing what it's best at.
 

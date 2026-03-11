@@ -703,6 +703,7 @@ impl Messaging for MattermostAdapter {
                 author: p.user_id,
                 content: p.message,
                 is_bot: false,
+                timestamp: None,
             })
             .collect();
 

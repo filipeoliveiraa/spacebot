@@ -2,8 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, providers, secrets, settings, skills, system, tasks, tools, webchat, workers,
+    agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
+    messaging, models, opencode_proxy, projects, providers, secrets, settings, skills, ssh, system,
+    tasks, tools, webchat, workers,
 };
 
 use axum::Json;
@@ -13,7 +14,7 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use rust_embed::Embed;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -86,10 +87,30 @@ pub async fn start_http_server(
             "/channels",
             get(channels::list_channels).delete(channels::delete_channel),
         )
+        .route("/channels/archive", put(channels::set_channel_archive))
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
+        .route("/channels/inspect", get(channels::inspect_prompt))
+        .route(
+            "/channels/inspect/capture",
+            post(channels::set_prompt_capture),
+        )
+        .route(
+            "/channels/inspect/snapshots",
+            get(channels::list_prompt_snapshots),
+        )
+        .route(
+            "/channels/inspect/snapshot",
+            get(channels::get_prompt_snapshot),
+        )
         .route("/agents/workers", get(workers::list_workers))
         .route("/agents/workers/detail", get(workers::worker_detail))
+        .route(
+            "/opencode/{port}/{*path}",
+            any(opencode_proxy::opencode_proxy),
+        )
+        .route("/opencode/{port}", any(opencode_proxy::opencode_proxy))
+        .route("/opencode/{port}/", any(opencode_proxy::opencode_proxy))
         .route("/agents/memories", get(memories::list_memories))
         .route("/agents/memories/search", get(memories::search_memories))
         .route("/agents/memories/graph", get(memories::memory_graph))
@@ -99,8 +120,19 @@ pub async fn start_http_server(
         )
         .route("/cortex/events", get(cortex::cortex_events))
         .route("/cortex-chat/messages", get(cortex::cortex_chat_messages))
+        .route("/cortex-chat/threads", get(cortex::cortex_chat_threads))
+        .route(
+            "/cortex-chat/thread",
+            delete(cortex::cortex_chat_delete_thread),
+        )
         .route("/cortex-chat/send", post(cortex::cortex_chat_send))
         .route("/agents/profile", get(agents::get_agent_profile))
+        .route(
+            "/agents/avatar",
+            get(agents::get_avatar)
+                .post(agents::upload_avatar)
+                .delete(agents::delete_avatar),
+        )
         .route(
             "/agents/identity",
             get(agents::get_identity).put(agents::update_identity),
@@ -130,6 +162,34 @@ pub async fn start_http_server(
         )
         .route("/agents/tasks/{number}/approve", post(tasks::approve_task))
         .route("/agents/tasks/{number}/execute", post(tasks::execute_task))
+        .route(
+            "/agents/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
+        .route(
+            "/agents/projects/{id}",
+            get(projects::get_project)
+                .put(projects::update_project)
+                .delete(projects::delete_project),
+        )
+        .route("/agents/projects/{id}/scan", post(projects::scan_project))
+        .route(
+            "/agents/projects/{id}/disk-usage",
+            get(projects::disk_usage),
+        )
+        .route("/agents/projects/{id}/repos", post(projects::create_repo))
+        .route(
+            "/agents/projects/{id}/repos/{repo_id}",
+            delete(projects::delete_repo),
+        )
+        .route(
+            "/agents/projects/{id}/worktrees",
+            post(projects::create_worktree),
+        )
+        .route(
+            "/agents/projects/{id}/worktrees/{wt_id}",
+            delete(projects::delete_worktree),
+        )
         .route("/channels/cancel", post(channels::cancel_process))
         .route(
             "/agents/ingest/files",
@@ -137,7 +197,9 @@ pub async fn start_http_server(
         )
         .route("/agents/ingest/upload", post(ingest::upload_ingest_file))
         .route("/agents/skills", get(skills::list_skills))
+        .route("/agents/skills/content", get(skills::get_skill_content))
         .route("/agents/skills/install", post(skills::install_skill))
+        .route("/agents/skills/upload", post(skills::upload_skill))
         .route("/agents/skills/remove", delete(skills::remove_skill))
         .route("/agents/tools", get(tools::list_tools))
         // Secret store management
@@ -157,6 +219,10 @@ pub async fn start_http_server(
         .route("/secrets/import", post(secrets::import_secrets))
         .route("/skills/registry/browse", get(skills::registry_browse))
         .route("/skills/registry/search", get(skills::registry_search))
+        .route(
+            "/skills/registry/content",
+            get(skills::registry_skill_content),
+        )
         .route(
             "/providers",
             get(providers::get_providers).put(providers::update_provider),
@@ -203,6 +269,9 @@ pub async fn start_http_server(
             get(settings::update_check).post(settings::update_check_now),
         )
         .route("/update/apply", post(settings::update_apply))
+        .route("/changelog", get(settings::changelog))
+        .route("/ssh/authorized-key", put(ssh::set_authorized_key))
+        .route("/ssh/status", get(ssh::ssh_status))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
         .route("/links", get(links::list_links).post(links::create_link))
@@ -222,11 +291,17 @@ pub async fn start_http_server(
             "/humans/{id}",
             put(links::update_human).delete(links::delete_human),
         )
+        // Factory: preset archetypes
+        .route("/factory/presets", get(factory::list_presets))
+        .route("/factory/presets/{id}", get(factory::get_preset))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_auth_middleware,
         ));
+
+    #[cfg(feature = "metrics")]
+    let api_routes = api_routes.layer(middleware::from_fn(metrics_middleware));
 
     let app = Router::new()
         .nest("/api", api_routes)
@@ -283,6 +358,96 @@ async fn api_auth_middleware(
         )
             .into_response()
     }
+}
+
+#[cfg(feature = "metrics")]
+async fn metrics_middleware(request: Request, next: Next) -> Response {
+    let method = request.method().to_string();
+    let path = normalize_api_path(request.uri().path());
+
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    let duration = start.elapsed().as_secs_f64();
+
+    let status = response.status().as_u16().to_string();
+    let metrics = crate::telemetry::Metrics::global();
+    metrics
+        .http_requests_total
+        .with_label_values(&[&method, &path, &status])
+        .inc();
+    metrics
+        .http_request_duration_seconds
+        .with_label_values(&[&method, &path])
+        .observe(duration);
+
+    response
+}
+
+/// Normalize API path to prevent label cardinality explosion.
+///
+/// Replaces dynamic segments (UUIDs, numeric IDs, names in known positions)
+/// with placeholder tokens.
+#[cfg(feature = "metrics")]
+fn normalize_api_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').collect();
+    let mut normalized = Vec::with_capacity(parts.len());
+
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            normalized.push(*part);
+            continue;
+        }
+        // UUID pattern (8-4-4-4-12 hex)
+        if part.len() == 36 && part.chars().filter(|c| *c == '-').count() == 4 {
+            normalized.push("{id}");
+        // Purely numeric segment
+        } else if part.chars().all(|c| c.is_ascii_digit()) {
+            normalized.push("{number}");
+        // Dynamic name segments after known resource paths
+        } else if i >= 2 {
+            let parent = parts.get(i - 1).copied().unwrap_or("");
+            match parent {
+                "secrets" | "groups" | "humans" | "links" => normalized.push("{name}"),
+                "servers" | "providers" => normalized.push("{name}"),
+                "opencode" => normalized.push("{port}"),
+                "agents"
+                    if !matches!(
+                        *part,
+                        "mcp"
+                            | "warmup"
+                            | "overview"
+                            | "workers"
+                            | "memories"
+                            | "profile"
+                            | "identity"
+                            | "config"
+                            | "cron"
+                            | "tasks"
+                            | "ingest"
+                            | "skills"
+                            | "tools"
+                            | "links"
+                    ) =>
+                {
+                    normalized.push("{id}")
+                }
+                _ => {
+                    // Collapse any remaining segments after an opencode
+                    // port placeholder to avoid high-cardinality proxy
+                    // paths like /api/opencode/{port}/v1/chat/completions.
+                    if normalized.contains(&"{port}") {
+                        normalized.push("{proxy_path}");
+                        break;
+                    }
+                    normalized.push(part);
+                }
+            }
+        } else {
+            normalized.push(part);
+        }
+    }
+
+    normalized.join("/")
 }
 
 async fn static_handler(uri: Uri) -> Response {

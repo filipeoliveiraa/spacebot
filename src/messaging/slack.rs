@@ -32,6 +32,7 @@ use slack_morphism::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
+use tokio::time::{Duration, timeout};
 
 /// State shared with socket mode callbacks via `SlackClientEventsUserState`.
 struct SlackAdapterState {
@@ -260,6 +261,58 @@ async fn handle_message_event(
         &adapter_state.channel_name_cache,
     )
     .await;
+    let mut metadata = metadata;
+    let bot_mention = format!("<@{}>", adapter_state.bot_user_id);
+    let mentioned_bot = msg_event
+        .content
+        .as_ref()
+        .and_then(|content| content.text.as_ref())
+        .map(|text| text.contains(&bot_mention))
+        .unwrap_or(false);
+    let token = SlackApiToken::new(SlackApiTokenValue(adapter_state.bot_token.clone()));
+    let session = client.open_session(&token);
+    let replied_to_bot = if let Some(thread_ts) = msg_event.origin.thread_ts.as_ref() {
+        // For threaded replies, treat as explicit invoke only when the thread
+        // root message belongs to this bot.
+        if thread_ts.0 != ts {
+            let thread_replies_request = SlackApiConversationsRepliesRequest::new(
+                SlackChannelId(channel_id.clone()),
+                thread_ts.clone(),
+            )
+            .with_limit(1);
+            match timeout(
+                Duration::from_secs(2),
+                session.conversations_replies(&thread_replies_request),
+            )
+            .await
+            {
+                Ok(Ok(response)) => response
+                    .messages
+                    .first()
+                    .and_then(|message| message.sender.user.as_ref())
+                    .is_some_and(|user| user.0 == adapter_state.bot_user_id),
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "failed to resolve slack thread parent for reply invoke");
+                    false
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "timed out resolving slack thread parent for reply invoke"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    metadata.insert(
+        "slack_mentions_or_replies_to_bot".into(),
+        serde_json::Value::Bool(mentioned_bot || replied_to_bot),
+    );
 
     send_inbound(
         &adapter_state.inbound_tx,
@@ -350,6 +403,11 @@ async fn handle_app_mention_event(
         &adapter_state.channel_name_cache,
     )
     .await;
+    let mut metadata = metadata;
+    metadata.insert(
+        "slack_mentions_or_replies_to_bot".into(),
+        serde_json::Value::Bool(true),
+    );
 
     send_inbound(
         &adapter_state.inbound_tx,
@@ -1196,10 +1254,12 @@ impl Messaging for SlackAdapter {
                 } else {
                     "unknown".to_string()
                 };
+                let timestamp = parse_slack_history_timestamp(&msg.origin.ts.0);
                 HistoryMessage {
                     author,
                     content: msg.content.text.clone().unwrap_or_default(),
                     is_bot,
+                    timestamp,
                 }
             })
             .collect();
@@ -1259,6 +1319,37 @@ fn extract_thread_ts(message: &InboundMessage) -> Option<SlackTs> {
         .get("slack_thread_ts")
         .and_then(|v| v.as_str())
         .map(|s| SlackTs(s.to_string()))
+}
+
+fn parse_slack_history_timestamp(raw_timestamp: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let Some(seconds_part) = raw_timestamp.split('.').next() else {
+        tracing::warn!(timestamp = %raw_timestamp, "slack history timestamp missing seconds");
+        return None;
+    };
+
+    let seconds = match seconds_part.parse::<i64>() {
+        Ok(seconds) => seconds,
+        Err(error) => {
+            tracing::warn!(
+                timestamp = %raw_timestamp,
+                %error,
+                "failed to parse slack history timestamp"
+            );
+            return None;
+        }
+    };
+
+    match chrono::DateTime::from_timestamp(seconds, 0) {
+        Some(timestamp) => Some(timestamp),
+        None => {
+            tracing::warn!(
+                timestamp = %raw_timestamp,
+                seconds,
+                "slack history timestamp out of range"
+            );
+            None
+        }
+    }
 }
 
 /// Build a `SlackMessageContent` using a Markdown block with plain text fallback.

@@ -13,29 +13,37 @@
 //!
 //! **Branch ToolServer** (one per branch, isolated):
 //! - `memory_save` + `memory_recall` + `memory_delete` + `channel_recall`
+//! - `spacebot_docs` for embedded self-documentation lookup
 //! - `task_create` + `task_list` + `task_update`
 //! - `spawn_worker` is included for channel-originated branches only
 //!
 //! **Worker ToolServer** (one per worker, created at spawn time):
-//! - `shell`, `file`, `exec` — stateless, registered at creation
+//! - `shell`, `file_read`/`file_write`/`file_edit`/`file_list` — stateless, registered at creation
 //! - `task_update` — scoped to the worker's assigned task
 //! - `set_status` — per-worker instance, registered at creation
 //!
 //! **Cortex ToolServer** (one per agent):
 //! - `memory_save` — registered at startup
+//!
+//! **Cortex Chat ToolServer** (interactive admin chat):
+//! - branch + worker tool superset plus `spacebot_docs`, `config_inspect`, and `spawn_worker`
 
+pub mod attachment_recall;
 pub mod branch_tool;
 pub mod browser;
 pub mod cancel;
 pub mod channel_recall;
+pub mod config_inspect;
 pub mod cron;
 pub mod email_search;
-pub mod exec;
 pub mod file;
+pub mod install_skill;
 pub mod mcp;
 pub mod memory_delete;
+pub mod memory_persistence_complete;
 pub mod memory_recall;
 pub mod memory_save;
+pub mod project_manage;
 pub mod react;
 pub mod read_skill;
 pub mod reply;
@@ -46,7 +54,9 @@ pub mod send_file;
 pub mod send_message_to_another_channel;
 pub mod set_status;
 pub mod shell;
+pub mod skills_search;
 pub mod skip;
+pub mod spacebot_docs;
 pub mod spawn_worker;
 pub mod task_create;
 pub mod task_list;
@@ -54,28 +64,55 @@ pub mod task_update;
 pub mod web_search;
 pub mod worker_inspect;
 
+pub mod factory_create_agent;
+pub mod factory_list_presets;
+pub mod factory_load_preset;
+pub mod factory_search_context;
+pub mod factory_update_config;
+pub mod factory_update_identity;
+
+pub use attachment_recall::{
+    AttachmentRecallArgs, AttachmentRecallError, AttachmentRecallOutput, AttachmentRecallTool,
+};
 pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
 pub use browser::{
-    ActKind, BrowserAction, BrowserArgs, BrowserError, BrowserOutput, BrowserTool, ElementSummary,
-    TabInfo,
+    BrowserError, BrowserOutput, SharedBrowserHandle, TabInfo, new_shared_browser_handle,
+    register_browser_tools,
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
 pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
 };
+pub use config_inspect::{
+    ConfigInspectArgs, ConfigInspectError, ConfigInspectOutput, ConfigInspectTool,
+};
 pub use cron::{CronArgs, CronError, CronOutput, CronTool};
 pub use email_search::{EmailSearchArgs, EmailSearchError, EmailSearchOutput, EmailSearchTool};
-pub use exec::{EnvVar, ExecArgs, ExecError, ExecOutput, ExecResult, ExecTool};
-pub use file::{FileArgs, FileEntry, FileEntryOutput, FileError, FileOutput, FileTool, FileType};
+pub use file::{
+    FileEditArgs, FileEditTool, FileEntry, FileEntryOutput, FileError, FileListArgs, FileListTool,
+    FileOutput, FileReadArgs, FileReadTool, FileType, FileWriteArgs, FileWriteTool,
+    register_file_tools,
+};
+pub use install_skill::{
+    InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
+};
 pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
 pub use memory_delete::{
     MemoryDeleteArgs, MemoryDeleteError, MemoryDeleteOutput, MemoryDeleteTool,
+};
+pub use memory_persistence_complete::{
+    MemoryPersistenceCompleteArgs, MemoryPersistenceCompleteError, MemoryPersistenceCompleteOutput,
+    MemoryPersistenceCompleteTool, MemoryPersistenceContractState,
+    MemoryPersistenceTerminalOutcome,
 };
 pub use memory_recall::{
     MemoryOutput, MemoryRecallArgs, MemoryRecallError, MemoryRecallOutput, MemoryRecallTool,
 };
 pub use memory_save::{
     AssociationInput, MemorySaveArgs, MemorySaveError, MemorySaveOutput, MemorySaveTool,
+};
+pub use project_manage::{
+    ProjectManageArgs, ProjectManageError, ProjectManageOutput, ProjectManageTool,
 };
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
 pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
@@ -89,16 +126,48 @@ pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
 pub use send_message_to_another_channel::{
     SendMessageArgs, SendMessageError, SendMessageOutput, SendMessageTool,
 };
-pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool};
-pub use shell::{ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
+pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool, StatusKind};
+pub use shell::{EnvVar, ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
+pub use skills_search::{
+    SkillsSearchArgs, SkillsSearchError, SkillsSearchOutput, SkillsSearchTool,
+};
 pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
-pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool};
+pub use spacebot_docs::{
+    SpacebotDocContent, SpacebotDocsArgs, SpacebotDocsError, SpacebotDocsOutput, SpacebotDocsTool,
+};
+pub use spawn_worker::{
+    DetachedSpawnWorkerTool, SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool,
+};
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
 pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use worker_inspect::{
     WorkerInspectArgs, WorkerInspectError, WorkerInspectOutput, WorkerInspectTool,
+};
+
+pub use factory_create_agent::{
+    FactoryCreateAgentArgs, FactoryCreateAgentError, FactoryCreateAgentOutput,
+    FactoryCreateAgentTool,
+};
+pub use factory_list_presets::{
+    FactoryListPresetsArgs, FactoryListPresetsError, FactoryListPresetsOutput,
+    FactoryListPresetsTool,
+};
+pub use factory_load_preset::{
+    FactoryLoadPresetArgs, FactoryLoadPresetError, FactoryLoadPresetOutput, FactoryLoadPresetTool,
+};
+pub use factory_search_context::{
+    FactorySearchContextArgs, FactorySearchContextError, FactorySearchContextOutput,
+    FactorySearchContextTool,
+};
+pub use factory_update_config::{
+    FactoryUpdateConfigArgs, FactoryUpdateConfigError, FactoryUpdateConfigOutput,
+    FactoryUpdateConfigTool,
+};
+pub use factory_update_identity::{
+    FactoryUpdateIdentityArgs, FactoryUpdateIdentityError, FactoryUpdateIdentityOutput,
+    FactoryUpdateIdentityTool,
 };
 
 use crate::agent::channel::ChannelState;
@@ -112,6 +181,14 @@ use rig::tool::server::{ToolServer, ToolServerHandle};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
+
+#[derive(Debug, Clone)]
+pub enum BranchToolProfile {
+    Default,
+    MemoryPersistence {
+        contract_state: Arc<MemoryPersistenceContractState>,
+    },
+}
 
 /// Deserialize a `u64` that may arrive as either a JSON number or a JSON string.
 ///
@@ -170,16 +247,20 @@ pub const MAX_DIR_ENTRIES: usize = 500;
 /// Cuts at the last valid char boundary before `max_bytes` so we never split
 /// a multi-byte character. The truncation notice tells the LLM the original
 /// size and how to get the rest (pipe through head/tail or read with offset).
+fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> usize {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 pub fn truncate_output(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();
     }
 
-    // Find the last char boundary at or before max_bytes
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = truncate_at_char_boundary(value, max_bytes);
 
     let total = value.len();
     let truncated_bytes = total - end;
@@ -188,6 +269,30 @@ pub fn truncate_output(value: &str, max_bytes: usize) -> String {
          Use head/tail/offset to read specific sections]",
         &value[..end]
     )
+}
+
+/// Truncate to a byte limit and append `...`, preserving UTF-8 boundaries.
+///
+/// The returned string will never exceed `max_bytes`. If there's not enough
+/// room for both content and "...", only the content is returned (truncated
+/// to fit within `max_bytes`).
+pub fn truncate_utf8_ellipsis(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    // Try to leave room for "..." (3 bytes)
+    let available = max_bytes.saturating_sub(3);
+    let end = truncate_at_char_boundary(value, available);
+
+    // If we have room for "...", append it; otherwise just return truncated content
+    if end > 0 && end + 3 <= max_bytes {
+        format!("{}...", &value[..end])
+    } else {
+        // Not enough room for "...", return as much as fits
+        let end = truncate_at_char_boundary(value, max_bytes);
+        value[..end].to_string()
+    }
 }
 
 /// Returns true when text looks like structured/tool payloads that should never
@@ -215,12 +320,19 @@ pub fn should_block_user_visible_text(value: &str) -> bool {
         return false;
     }
 
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+    if trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('(') {
         return true;
     }
 
     let lower = trimmed.to_ascii_lowercase();
     if TOOL_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+
+    let punctuation_trimmed = lower.trim_matches(|character: char| {
+        character.is_ascii_punctuation() || character.is_ascii_whitespace()
+    });
+    if punctuation_trimmed == "skip" {
         return true;
     }
 
@@ -243,6 +355,7 @@ pub async fn add_channel_tools(
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
     allow_direct_reply: bool,
+    current_adapter: Option<String>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
 
@@ -280,6 +393,7 @@ pub async fn add_channel_tools(
                 state.channel_store.clone(),
                 state.conversation_logger.clone(),
                 send_message_display_name,
+                current_adapter.clone(),
             ))
             .await?;
     }
@@ -287,8 +401,30 @@ pub async fn add_channel_tools(
         .add_tool(SendFileTool::new(
             response_tx.clone(),
             state.deps.runtime_config.workspace_dir.clone(),
+            state.deps.sandbox.clone(),
         ))
         .await?;
+    handle
+        .add_tool(ProjectManageTool::new(
+            state.deps.project_store.clone(),
+            state.deps.agent_id.to_string(),
+        ))
+        .await?;
+    // Add attachment recall tool when save_attachments is enabled
+    if state
+        .deps
+        .runtime_config
+        .channel_config
+        .load()
+        .save_attachments
+    {
+        handle
+            .add_tool(AttachmentRecallTool::new(
+                state.deps.sqlite_pool.clone(),
+                state.channel_id.clone(),
+            ))
+            .await?;
+    }
     handle.add_tool(CancelTool::new(state)).await?;
     handle
         .add_tool(SkipTool::new(skip_flag.clone(), response_tx.clone()))
@@ -309,10 +445,15 @@ pub async fn add_channel_tools(
 
 fn default_delivery_target_for_conversation(conversation_id: &str) -> Option<String> {
     let parsed = crate::messaging::target::parse_delivery_target(conversation_id)?;
-    if parsed.adapter != "discord" {
-        return None;
+    match parsed.adapter.as_str() {
+        // Cron channels can't receive broadcast delivery.
+        "cron" => None,
+        // Portal conversation IDs use the "portal:" prefix but the messaging
+        // adapter is registered as "webchat". Remap so the manager can find it,
+        // and pass the full original conversation_id as the target.
+        "portal" => Some(format!("webchat:{conversation_id}")),
+        _ => Some(parsed.to_string()),
     }
-    Some(parsed.to_string())
 }
 
 /// Remove per-channel tools from a running ToolServer.
@@ -333,18 +474,29 @@ pub async fn remove_channel_tools(
     handle.remove_tool(SkipTool::NAME).await?;
     handle.remove_tool(SendFileTool::NAME).await?;
     handle.remove_tool(ReactTool::NAME).await?;
-    // Cron, send_message, and send_agent_message removal is best-effort since not all channels have them
+    handle.remove_tool(ProjectManageTool::NAME).await?;
+    // Cron, send_message, send_agent_message, and attachment_recall removal is
+    // best-effort since not all channels have them
     let _ = handle.remove_tool(CronTool::NAME).await;
     let _ = handle.remove_tool(SendMessageTool::NAME).await;
     let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;
+    let _ = handle.remove_tool(AttachmentRecallTool::NAME).await;
     Ok(())
+}
+
+fn memory_save_with_events(
+    memory_search: Arc<MemorySearch>,
+    agent_id: AgentId,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
+) -> MemorySaveTool {
+    MemorySaveTool::new(memory_search).with_event_bus(agent_id, memory_event_tx)
 }
 
 /// Create a per-branch ToolServer with memory tools.
 ///
 /// Each branch gets its own isolated ToolServer so `memory_recall` is never
-/// visible to the channel. Both `memory_save` and `memory_recall` are
-/// registered at creation.
+/// visible to the channel. Includes memory tools, task-board tools, and
+/// `spacebot_docs` for on-demand self-documentation lookup.
 #[allow(clippy::too_many_arguments)]
 pub fn create_branch_tool_server(
     state: Option<ChannelState>,
@@ -352,15 +504,27 @@ pub fn create_branch_tool_server(
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
     runtime_config: Arc<RuntimeConfig>,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
+    profile: BranchToolProfile,
 ) -> ToolServerHandle {
+    let mut memory_save = memory_save_with_events(
+        memory_search.clone(),
+        agent_id.clone(),
+        memory_event_tx.clone(),
+    );
+    if let BranchToolProfile::MemoryPersistence { contract_state } = &profile {
+        memory_save = memory_save.with_contract_state(contract_state.clone());
+    }
+
     let mut server = ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search.clone()))
+        .tool(memory_save)
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
+        .tool(SpacebotDocsTool::new())
         .tool(EmailSearchTool::new(runtime_config))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(TaskCreateTool::new(
@@ -370,6 +534,10 @@ pub fn create_branch_tool_server(
         ))
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
+
+    if let BranchToolProfile::MemoryPersistence { contract_state } = profile {
+        server = server.tool(MemoryPersistenceCompleteTool::new(contract_state));
+    }
 
     if let Some(state) = state {
         server = server.tool(SpawnWorkerTool::new(state));
@@ -384,7 +552,7 @@ pub fn create_branch_tool_server(
 /// the specific worker's ID so status updates route correctly. The browser tool
 /// is included when browser automation is enabled in the agent config.
 ///
-/// Shell and exec commands are sandboxed via the `Sandbox` backend.
+/// Shell commands are sandboxed via the `Sandbox` backend.
 /// File operations are restricted to `workspace` via path validation.
 #[allow(clippy::too_many_arguments)]
 pub fn create_worker_tool_server(
@@ -403,8 +571,6 @@ pub fn create_worker_tool_server(
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
-        .tool(FileTool::new(workspace.clone()))
-        .tool(ExecTool::new(workspace, sandbox))
         .tool(TaskUpdateTool::for_worker(
             task_store,
             agent_id.clone(),
@@ -419,12 +585,14 @@ pub fn create_worker_tool_server(
         })
         .tool(ReadSkillTool::new(runtime_config.clone()));
 
+    server = register_file_tools(server, workspace, sandbox);
+
     if let Some(store) = runtime_config.secrets.load().as_ref() {
         server = server.tool(SecretSetTool::new(store.clone()));
     }
 
     if browser_config.enabled {
-        server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
+        server = register_browser_tools(server, browser_config, screenshot_dir, &runtime_config);
     }
 
     if let Some(key) = brave_search_key {
@@ -442,22 +610,34 @@ pub fn create_worker_tool_server(
 ///
 /// The cortex only needs memory_save for consolidation. Additional tools can be
 /// added later as cortex capabilities expand.
-pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServerHandle {
+pub fn create_cortex_tool_server(
+    agent_id: AgentId,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
+    memory_search: Arc<MemorySearch>,
+) -> ToolServerHandle {
     ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search))
+        .tool(memory_save_with_events(
+            memory_search,
+            agent_id,
+            memory_event_tx,
+        ))
         .run()
 }
 
 /// Create a ToolServer for cortex chat sessions.
 ///
-/// Combines branch tools (memory) with worker tools (shell, file, exec) to give
+/// Combines branch tools (memory) with worker tools (shell, file) to give
 /// the interactive cortex full capabilities. Does not include channel-specific
 /// tools (reply, react, skip) since the cortex chat doesn't talk to platforms.
+/// Adds `config_inspect` for live runtime config introspection and
+/// `spacebot_docs` for embedded docs/changelog retrieval.
 #[allow(clippy::too_many_arguments)]
 pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
+    deps: crate::AgentDeps,
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
@@ -466,13 +646,38 @@ pub fn create_cortex_chat_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
+    runtime_config: Arc<RuntimeConfig>,
+    api_state: Arc<crate::api::ApiState>,
+    cortex_ctx: Option<crate::tools::spawn_worker::CortexChatContext>,
 ) -> ToolServerHandle {
+    let logs_dir = workspace.join(".spacebot").join("logs");
+
+    let spawn_tool = {
+        let tool = DetachedSpawnWorkerTool::new(deps, screenshot_dir.clone(), logs_dir);
+        match cortex_ctx {
+            Some(ctx) => tool.with_cortex_context(ctx),
+            None => tool,
+        }
+    };
+
     let mut server = ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search.clone()))
+        .tool(memory_save_with_events(
+            memory_search.clone(),
+            agent_id.clone(),
+            memory_event_tx,
+        ))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
+        .tool(SpacebotDocsTool::new())
+        .tool(ConfigInspectTool::new(
+            agent_id.to_string(),
+            runtime_config.clone(),
+        ))
+        .tool(SkillsSearchTool::new(runtime_config.clone()))
+        .tool(InstallSkillTool::new(runtime_config.clone(), api_state))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
+        .tool(spawn_tool)
         .tool(TaskCreateTool::new(
             task_store.clone(),
             agent_id.to_string(),
@@ -480,12 +685,12 @@ pub fn create_cortex_chat_tool_server(
         ))
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
-        .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
-        .tool(FileTool::new(workspace.clone()))
-        .tool(ExecTool::new(workspace, sandbox));
+        .tool(ShellTool::new(workspace.clone(), sandbox.clone()));
+
+    server = register_file_tools(server, workspace, sandbox);
 
     if browser_config.enabled {
-        server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
+        server = register_browser_tools(server, browser_config, screenshot_dir, &runtime_config);
     }
 
     if let Some(key) = brave_search_key {
@@ -493,6 +698,51 @@ pub fn create_cortex_chat_tool_server(
     }
 
     server.run()
+}
+
+/// Create a ToolServer for factory conversations (agent creation/refinement).
+///
+/// Factory tools are system-level — they receive `Arc<ApiState>` directly since
+/// they perform cross-agent mutations (creating agents, writing config, creating
+/// links). The memory search is from the main agent (the one running the factory
+/// conversation) to provide organizational context.
+pub fn create_factory_tool_server(
+    state: Arc<crate::api::ApiState>,
+    memory_search: Arc<MemorySearch>,
+) -> ToolServerHandle {
+    ToolServer::new()
+        .tool(FactoryListPresetsTool::new())
+        .tool(FactoryLoadPresetTool::new())
+        .tool(FactorySearchContextTool::new(memory_search))
+        .tool(FactoryCreateAgentTool::new(state.clone()))
+        .tool(FactoryUpdateIdentityTool::new(state.clone()))
+        .tool(FactoryUpdateConfigTool::new(state))
+        .run()
+}
+
+/// Add factory tools (agent creation/refinement) to an existing tool server handle.
+///
+/// Used to augment the cortex chat tool server with factory capabilities.
+/// The `memory_search` should be from the agent running the factory conversation
+/// (typically the main agent) so `factory_search_context` queries its memories.
+pub async fn add_factory_tools(
+    handle: &ToolServerHandle,
+    state: Arc<crate::api::ApiState>,
+    memory_search: Arc<MemorySearch>,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    handle.add_tool(FactoryListPresetsTool::new()).await?;
+    handle.add_tool(FactoryLoadPresetTool::new()).await?;
+    handle
+        .add_tool(FactorySearchContextTool::new(memory_search))
+        .await?;
+    handle
+        .add_tool(FactoryCreateAgentTool::new(state.clone()))
+        .await?;
+    handle
+        .add_tool(FactoryUpdateIdentityTool::new(state.clone()))
+        .await?;
+    handle.add_tool(FactoryUpdateConfigTool::new(state)).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -527,23 +777,180 @@ mod tests {
     }
 
     #[test]
-    fn exec_args_parses_timeout_as_string() {
-        let args: exec::ExecArgs =
-            serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": "300"}"#).unwrap();
-        assert_eq!(args.timeout_seconds, 300);
+    fn shell_args_parses_env_field() {
+        let args: shell::ShellArgs = serde_json::from_str(
+            r#"{"command": "echo $FOO", "env": [{"key": "FOO", "value": "bar"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(args.env.len(), 1);
+        assert_eq!(args.env[0].key, "FOO");
+        assert_eq!(args.env[0].value, "bar");
     }
 
     #[test]
-    fn exec_args_parses_timeout_as_integer() {
-        let args: exec::ExecArgs =
-            serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": 90}"#).unwrap();
-        assert_eq!(args.timeout_seconds, 90);
+    fn shell_args_defaults_empty_env() {
+        let args: shell::ShellArgs = serde_json::from_str(r#"{"command": "ls"}"#).unwrap();
+        assert!(args.env.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shell_rejects_empty_env_var_name() {
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let workspace = std::env::temp_dir();
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let tool = shell::ShellTool::new(workspace, sandbox);
+        let args = shell::ShellArgs {
+            command: "echo hi".into(),
+            working_dir: None,
+            env: vec![shell::EnvVar {
+                key: "".into(),
+                value: "val".into(),
+            }],
+            timeout_seconds: 5,
+        };
+        let result = rig::tool::Tool::call(&tool, args).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("cannot be empty"),
+            "should reject empty env var name"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_rejects_env_var_name_with_equals() {
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let workspace = std::env::temp_dir();
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let tool = shell::ShellTool::new(workspace, sandbox);
+        let args = shell::ShellArgs {
+            command: "echo hi".into(),
+            working_dir: None,
+            env: vec![shell::EnvVar {
+                key: "FOO=BAR".into(),
+                value: "val".into(),
+            }],
+            timeout_seconds: 5,
+        };
+        let result = rig::tool::Tool::call(&tool, args).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot contain '='"),
+            "should reject env var name containing ="
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_rejects_env_var_with_null_bytes() {
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let workspace = std::env::temp_dir();
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let tool = shell::ShellTool::new(workspace, sandbox);
+        let args = shell::ShellArgs {
+            command: "echo hi".into(),
+            working_dir: None,
+            env: vec![shell::EnvVar {
+                key: "FOO\0BAR".into(),
+                value: "val".into(),
+            }],
+            timeout_seconds: 5,
+        };
+        let result = rig::tool::Tool::call(&tool, args).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot contain null"),
+            "should reject env var with null bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_rejects_dangerous_env_var() {
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let workspace = std::env::temp_dir();
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let tool = shell::ShellTool::new(workspace, sandbox);
+        let args = shell::ShellArgs {
+            command: "echo hi".into(),
+            working_dir: None,
+            env: vec![shell::EnvVar {
+                key: "LD_PRELOAD".into(),
+                value: "/evil.so".into(),
+            }],
+            timeout_seconds: 5,
+        };
+        let result = rig::tool::Tool::call(&tool, args).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("code injection"),
+            "should reject dangerous env var"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_rejects_dangerous_env_var_case_insensitive() {
+        let config = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::sandbox::SandboxConfig::default(),
+        ));
+        let workspace = std::env::temp_dir();
+        let sandbox = std::sync::Arc::new(crate::sandbox::Sandbox::new_for_test(
+            config,
+            workspace.clone(),
+        ));
+        let tool = shell::ShellTool::new(workspace, sandbox);
+        let args = shell::ShellArgs {
+            command: "echo hi".into(),
+            working_dir: None,
+            env: vec![shell::EnvVar {
+                key: "ld_preload".into(),
+                value: "/evil.so".into(),
+            }],
+            timeout_seconds: 5,
+        };
+        let result = rig::tool::Tool::call(&tool, args).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("code injection"),
+            "should reject dangerous env var regardless of case"
+        );
     }
 
     #[test]
     fn blocks_json_bracket_and_tool_syntax_output() {
         assert!(should_block_user_visible_text("{\"content\":\"hello\"}"));
         assert!(should_block_user_visible_text("[\"one\",\"two\"]"));
+        assert!(should_block_user_visible_text(
+            "(just commentary - skipping)"
+        ));
+        assert!(should_block_user_visible_text(
+            "(Empty response: {'content': [{'type': 'thinking'}]})"
+        ));
+        assert!(should_block_user_visible_text("skip"));
+        assert!(should_block_user_visible_text("  SKIP  "));
         assert!(should_block_user_visible_text(
             "[reply]\n{\"content\":\"hello\"}"
         ));
@@ -555,6 +962,21 @@ mod tests {
     #[test]
     fn allows_normal_plaintext_output() {
         assert!(!should_block_user_visible_text("hello team"));
+        assert!(!should_block_user_visible_text("skipping for now"));
+        assert!(!should_block_user_visible_text(
+            "I can skip that if you want."
+        ));
         assert!(!should_block_user_visible_text("- first\n- second"));
+    }
+
+    #[test]
+    fn truncate_helpers_preserve_utf8_boundaries() {
+        let text = "🙂🙂🙂";
+        // For max_bytes=5: can fit "🙂" (4 bytes) but not "🙂..." (7 bytes)
+        // So we get just "🙂" without ellipsis since it wouldn't fit
+        assert_eq!(truncate_utf8_ellipsis(text, 5), "🙂");
+        // For larger max_bytes=10: can fit "🙂..." (7 bytes)
+        assert_eq!(truncate_utf8_ellipsis(text, 10), "🙂...");
+        assert!(truncate_output(text, 5).starts_with("🙂"));
     }
 }
