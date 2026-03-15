@@ -1877,7 +1877,7 @@ pub(super) fn build_adapter_validation_states(
     if let Some(mattermost) = &messaging.mattermost {
         let named_instances = validate_instance_names(
             "mattermost",
-            mattermost.instances.iter().map(|i| i.name.as_str()),
+            mattermost.instances.iter().map(|instance| instance.name.as_str()),
         )?;
         let default_present =
             !mattermost.base_url.trim().is_empty() && !mattermost.token.trim().is_empty();
@@ -2790,6 +2790,34 @@ mod mattermost_url_tests {
     fn rejects_unparseable_url() {
         assert!(validate_mattermost_url("not a url at all").is_err());
         assert!(validate_mattermost_url("").is_err());
+    }
+
+    #[test]
+    fn rejects_credentials_in_url() {
+        assert!(validate_mattermost_url("https://user:pass@mattermost.example.com").is_err());
+        assert!(validate_mattermost_url("https://user@mattermost.example.com").is_err());
+    }
+
+    #[test]
+    fn rejects_non_root_path() {
+        assert!(validate_mattermost_url("https://mattermost.example.com/some/path").is_err());
+        assert!(validate_mattermost_url("https://mattermost.example.com/mattermost").is_err());
+    }
+
+    #[test]
+    fn accepts_root_path() {
+        assert!(validate_mattermost_url("https://mattermost.example.com/").is_ok());
+        assert!(validate_mattermost_url("https://mattermost.example.com").is_ok());
+    }
+
+    #[test]
+    fn rejects_query_string() {
+        assert!(validate_mattermost_url("https://mattermost.example.com/?token=abc").is_err());
+    }
+
+    #[test]
+    fn rejects_fragment() {
+        assert!(validate_mattermost_url("https://mattermost.example.com/#section").is_err());
     }
 }
 

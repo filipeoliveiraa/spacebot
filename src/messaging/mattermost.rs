@@ -660,7 +660,13 @@ impl Messaging for MattermostAdapter {
                     });
                 self.start_typing(channel_id).await;
                 // Create a placeholder post with a zero-width space.
-                let post = self.create_post(channel_id, "\u{200B}", root_id).await?;
+                let post = match self.create_post(channel_id, "\u{200B}", root_id).await {
+                    Ok(p) => p,
+                    Err(error) => {
+                        self.stop_typing(channel_id).await;
+                        return Err(error);
+                    }
+                };
                 self.active_messages.write().await.insert(
                     message.id.clone(),
                     ActiveStream {
@@ -823,6 +829,16 @@ impl Messaging for MattermostAdapter {
 
                 let file_ids: Vec<_> =
                     upload.file_infos.iter().map(|f| f.id.as_str()).collect();
+                let root_id = message
+                    .metadata
+                    .get("mattermost_root_id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        message
+                            .metadata
+                            .get(crate::metadata_keys::REPLY_TO_MESSAGE_ID)
+                            .and_then(|v| v.as_str())
+                    });
                 let post_response = self.client
                     .post(self.api_url("/posts"))
                     .bearer_auth(self.token.as_ref())
@@ -830,6 +846,7 @@ impl Messaging for MattermostAdapter {
                         "channel_id": channel_id,
                         "message": caption.unwrap_or_default(),
                         "file_ids": file_ids,
+                        "root_id": root_id.unwrap_or(""),
                     }))
                     .send()
                     .await
@@ -1452,12 +1469,12 @@ mod tests {
         }
     }
 
-    fn bmfp(p: &MattermostPost, bot_id: &str, team_id: Option<&str>, perms: &MattermostPermissions) -> Option<InboundMessage> {
-        build_message_from_post(p, "mattermost", bot_id, "botuser", &team_id.map(String::from), perms, None, None)
+    fn build_message_from_mattermost_post(post: &MattermostPost, bot_id: &str, team_id: Option<&str>, perms: &MattermostPermissions) -> Option<InboundMessage> {
+        build_message_from_post(post, "mattermost", bot_id, "botuser", &team_id.map(String::from), perms, None, None)
     }
 
-    fn bmfp_named(p: &MattermostPost, bot_id: &str, bot_username: &str, team_id: Option<&str>, perms: &MattermostPermissions, display_name: Option<&str>, channel_name: Option<&str>) -> Option<InboundMessage> {
-        build_message_from_post(p, "mattermost", bot_id, bot_username, &team_id.map(String::from), perms, display_name, channel_name)
+    fn build_message_from_mattermost_post_named(post: &MattermostPost, bot_id: &str, bot_username: &str, team_id: Option<&str>, perms: &MattermostPermissions, display_name: Option<&str>, channel_name: Option<&str>) -> Option<InboundMessage> {
+        build_message_from_post(post, "mattermost", bot_id, bot_username, &team_id.map(String::from), perms, display_name, channel_name)
     }
 
     // --- build_message_from_post ---
@@ -1465,13 +1482,13 @@ mod tests {
     #[test]
     fn bot_messages_are_filtered() {
         let p = post("bot123", "chan1", None);
-        assert!(bmfp(&p, "bot123", None, &no_filters()).is_none());
+        assert!(build_message_from_mattermost_post(&p, "bot123", None, &no_filters()).is_none());
     }
 
     #[test]
     fn non_bot_message_passes_without_filters() {
         let p = post("user1", "chan1", None);
-        assert!(bmfp(&p, "bot123", Some("team1"), &no_filters()).is_some());
+        assert!(build_message_from_mattermost_post(&p, "bot123", Some("team1"), &no_filters()).is_some());
     }
 
     #[test]
@@ -1482,7 +1499,7 @@ mod tests {
             channel_filter: HashMap::new(),
             dm_allowed_users: vec![],
         };
-        assert!(bmfp(&p, "bot", Some("team1"), &perms).is_some());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team1"), &perms).is_some());
     }
 
     #[test]
@@ -1493,7 +1510,7 @@ mod tests {
             channel_filter: HashMap::new(),
             dm_allowed_users: vec![],
         };
-        assert!(bmfp(&p, "bot", Some("team2"), &perms).is_none());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team2"), &perms).is_none());
     }
 
     #[test]
@@ -1505,7 +1522,7 @@ mod tests {
             dm_allowed_users: vec![],
         };
         // No team_id in the event — must reject (fail-closed)
-        assert!(bmfp(&p, "bot", None, &perms).is_none());
+        assert!(build_message_from_mattermost_post(&p, "bot", None, &perms).is_none());
     }
 
     #[test]
@@ -1514,7 +1531,7 @@ mod tests {
         let mut cf = HashMap::new();
         cf.insert("team1".into(), vec!["chan1".into()]);
         let perms = MattermostPermissions { team_filter: None, channel_filter: cf, dm_allowed_users: vec![] };
-        assert!(bmfp(&p, "bot", Some("team1"), &perms).is_some());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team1"), &perms).is_some());
     }
 
     #[test]
@@ -1523,7 +1540,7 @@ mod tests {
         let mut cf = HashMap::new();
         cf.insert("team1".into(), vec!["chan1".into()]);
         let perms = MattermostPermissions { team_filter: None, channel_filter: cf, dm_allowed_users: vec![] };
-        assert!(bmfp(&p, "bot", Some("team1"), &perms).is_none());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team1"), &perms).is_none());
     }
 
     #[test]
@@ -1533,7 +1550,7 @@ mod tests {
         cf.insert("team1".into(), vec!["chan1".into()]);
         let perms = MattermostPermissions { team_filter: None, channel_filter: cf, dm_allowed_users: vec![] };
         // No team_id → can't look up allowed channels → reject
-        assert!(bmfp(&p, "bot", None, &perms).is_none());
+        assert!(build_message_from_mattermost_post(&p, "bot", None, &perms).is_none());
     }
 
     #[test]
@@ -1545,7 +1562,7 @@ mod tests {
         let mut cf = HashMap::new();
         cf.insert("team1".into(), vec!["chan1".into()]);
         let perms = MattermostPermissions { team_filter: None, channel_filter: cf, dm_allowed_users: vec![] };
-        assert!(bmfp(&p, "bot", Some("team2"), &perms).is_none());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team2"), &perms).is_none());
     }
 
     fn dm_perms(allowed: &[&str]) -> MattermostPermissions {
@@ -1559,39 +1576,39 @@ mod tests {
     #[test]
     fn dm_blocked_when_dm_allowed_users_empty() {
         let p = post("user1", "chan1", Some("D"));
-        assert!(bmfp(&p, "bot", Some("team1"), &no_filters()).is_none());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team1"), &no_filters()).is_none());
     }
 
     #[test]
     fn dm_allowed_for_listed_user() {
         let p = post("user1", "chan1", Some("D"));
-        assert!(bmfp(&p, "bot", Some("team1"), &dm_perms(&["user1"])).is_some());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team1"), &dm_perms(&["user1"])).is_some());
     }
 
     #[test]
     fn dm_blocked_for_unlisted_user() {
         let p = post("user2", "chan1", Some("D"));
-        assert!(bmfp(&p, "bot", Some("team1"), &dm_perms(&["user1"])).is_none());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team1"), &dm_perms(&["user1"])).is_none());
     }
 
     #[test]
     fn dm_filter_does_not_affect_channel_messages() {
         // channel messages (type "O") pass even with empty dm_allowed_users
         let p = post("user1", "chan1", Some("O"));
-        assert!(bmfp(&p, "bot", Some("team1"), &no_filters()).is_some());
+        assert!(build_message_from_mattermost_post(&p, "bot", Some("team1"), &no_filters()).is_some());
     }
 
     #[test]
     fn dm_conversation_id_uses_user_id() {
         let p = post("user1", "chan1", Some("D"));
-        let msg = bmfp(&p, "bot", Some("team1"), &dm_perms(&["user1"])).unwrap();
+        let msg = build_message_from_mattermost_post(&p, "bot", Some("team1"), &dm_perms(&["user1"])).unwrap();
         assert!(msg.conversation_id.contains(":dm:user1"), "expected DM conversation_id, got {}", msg.conversation_id);
     }
 
     #[test]
     fn channel_conversation_id_uses_channel_id() {
         let p = post("user1", "chan1", Some("O"));
-        let msg = bmfp(&p, "bot", Some("team1"), &no_filters()).unwrap();
+        let msg = build_message_from_mattermost_post(&p, "bot", Some("team1"), &no_filters()).unwrap();
         assert!(msg.conversation_id.contains(":chan1"), "expected channel conversation_id, got {}", msg.conversation_id);
         assert!(!msg.conversation_id.contains(":dm:"), "should not be DM, got {}", msg.conversation_id);
     }
@@ -1599,7 +1616,7 @@ mod tests {
     #[test]
     fn message_id_metadata_is_set() {
         let p = post("user1", "chan1", None);
-        let msg = bmfp(&p, "bot", Some("team1"), &no_filters()).unwrap();
+        let msg = build_message_from_mattermost_post(&p, "bot", Some("team1"), &no_filters()).unwrap();
         assert!(msg.metadata.contains_key(crate::metadata_keys::MESSAGE_ID));
     }
 
@@ -1609,7 +1626,7 @@ mod tests {
     fn mention_sets_flag_when_at_bot_username_in_message() {
         let mut p = post("user1", "chan1", Some("O"));
         p.message = "hey @botuser can you help?".into();
-        let msg = bmfp(&p, "bot", Some("team1"), &no_filters()).unwrap();
+        let msg = build_message_from_mattermost_post(&p, "bot", Some("team1"), &no_filters()).unwrap();
         assert_eq!(
             msg.metadata.get("mattermost_mentions_or_replies_to_bot").and_then(|v| v.as_bool()),
             Some(true),
@@ -1619,7 +1636,7 @@ mod tests {
     #[test]
     fn no_mention_flag_when_bot_not_mentioned() {
         let p = post("user1", "chan1", Some("O"));
-        let msg = bmfp(&p, "bot", Some("team1"), &no_filters()).unwrap();
+        let msg = build_message_from_mattermost_post(&p, "bot", Some("team1"), &no_filters()).unwrap();
         assert_eq!(
             msg.metadata.get("mattermost_mentions_or_replies_to_bot").and_then(|v| v.as_bool()),
             Some(false),
@@ -1631,7 +1648,7 @@ mod tests {
     #[test]
     fn sender_display_name_set_when_provided() {
         let p = post("user1", "chan1", Some("O"));
-        let msg = bmfp_named(&p, "bot", "botuser", Some("team1"), &no_filters(), Some("Alice"), None).unwrap();
+        let msg = build_message_from_mattermost_post_named(&p, "bot", "botuser", Some("team1"), &no_filters(), Some("Alice"), None).unwrap();
         assert_eq!(
             msg.metadata.get("sender_display_name").and_then(|v| v.as_str()),
             Some("Alice"),
@@ -1642,7 +1659,7 @@ mod tests {
     #[test]
     fn sender_display_name_absent_when_not_provided() {
         let p = post("user1", "chan1", Some("O"));
-        let msg = bmfp(&p, "bot", Some("team1"), &no_filters()).unwrap();
+        let msg = build_message_from_mattermost_post(&p, "bot", Some("team1"), &no_filters()).unwrap();
         assert!(msg.metadata.get("sender_display_name").is_none());
         assert!(msg.formatted_author.is_none());
     }
@@ -1652,7 +1669,7 @@ mod tests {
     #[test]
     fn channel_name_metadata_set_when_provided() {
         let p = post("user1", "chan1", Some("O"));
-        let msg = bmfp_named(&p, "bot", "botuser", Some("team1"), &no_filters(), None, Some("general")).unwrap();
+        let msg = build_message_from_mattermost_post_named(&p, "bot", "botuser", Some("team1"), &no_filters(), None, Some("general")).unwrap();
         assert_eq!(
             msg.metadata.get("mattermost_channel_name").and_then(|v| v.as_str()),
             Some("general"),
