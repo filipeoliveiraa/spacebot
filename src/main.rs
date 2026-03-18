@@ -1363,19 +1363,6 @@ fn bootstrap_secrets_store(
                 }
             };
 
-            // Remove any injected key files after reading.
-            for cleanup_path in tmpfs_paths {
-                if cleanup_path.exists()
-                    && let Err(error) = std::fs::remove_file(cleanup_path)
-                {
-                    tracing::warn!(
-                        %error,
-                        path = %cleanup_path.display(),
-                        "failed to remove tmpfs master key — key may remain accessible"
-                    );
-                }
-            }
-
             // Platform currently stores keys as 64-char hex strings. Decode
             // those to raw bytes before unlock; otherwise treat as raw bytes.
             if let Ok(text) = std::str::from_utf8(&raw_key) {
@@ -1406,6 +1393,18 @@ fn bootstrap_secrets_store(
                     unlocked = true;
                     if let Err(error) = keystore.store_key(KEYSTORE_INSTANCE_ID, &key) {
                         tracing::warn!(%error, "failed to persist master key to OS credential store");
+                    }
+                    // Clean up tmpfs key files only after a successful unlock.
+                    for cleanup_path in tmpfs_paths {
+                        if cleanup_path.exists()
+                            && let Err(error) = std::fs::remove_file(cleanup_path)
+                        {
+                            tracing::warn!(
+                                %error,
+                                path = %cleanup_path.display(),
+                                "failed to remove tmpfs master key — key may remain accessible"
+                            );
+                        }
                     }
                 }
                 Err(error) => {
