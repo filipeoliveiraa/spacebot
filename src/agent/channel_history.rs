@@ -1124,7 +1124,7 @@ mod tests {
 
     #[test]
     fn text_delta_events_are_filtered_by_channel_id() {
-        let target_channel: ChannelId = Arc::from("webchat:target");
+        let target_channel: ChannelId = Arc::from("portal:target");
 
         let matching_event = ProcessEvent::TextDelta {
             agent_id: Arc::from("agent"),
@@ -1137,8 +1137,8 @@ mod tests {
 
         let other_event = ProcessEvent::TextDelta {
             agent_id: Arc::from("agent"),
-            process_id: ProcessId::Channel(Arc::from("webchat:other")),
-            channel_id: Some(Arc::from("webchat:other")),
+            process_id: ProcessId::Channel(Arc::from("portal:other")),
+            channel_id: Some(Arc::from("portal:other")),
             text_delta: "hel".to_string(),
             aggregated_text: "hello".to_string(),
         };
@@ -1146,7 +1146,7 @@ mod tests {
 
         let unscoped_event = ProcessEvent::TextDelta {
             agent_id: Arc::from("agent"),
-            process_id: ProcessId::Channel(Arc::from("webchat:none")),
+            process_id: ProcessId::Channel(Arc::from("portal:none")),
             channel_id: None,
             text_delta: "hel".to_string(),
             aggregated_text: "hello".to_string(),

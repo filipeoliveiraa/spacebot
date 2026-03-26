@@ -104,6 +104,7 @@ impl Worker {
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
         input_rx: Option<mpsc::Receiver<String>>,
+        initial_history: Vec<rig::message::Message>,
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -134,7 +135,11 @@ impl Worker {
                 logs_dir,
                 status_tx,
                 status_rx,
-                prior_history: None,
+                prior_history: if initial_history.is_empty() {
+                    None
+                } else {
+                    Some(initial_history)
+                },
             },
             inject_tx,
         )
@@ -155,6 +160,7 @@ impl Worker {
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
+        initial_history: Vec<rig::message::Message>,
     ) -> (Self, mpsc::Sender<String>) {
         Self::build(
             channel_id,
@@ -166,6 +172,7 @@ impl Worker {
             brave_search_key,
             logs_dir,
             None,
+            initial_history,
         )
     }
 
@@ -184,6 +191,7 @@ impl Worker {
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
+        initial_history: Vec<rig::message::Message>,
     ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
         let (worker, inject_tx) = Self::build(
@@ -196,6 +204,7 @@ impl Worker {
             brave_search_key,
             logs_dir,
             Some(input_rx),
+            initial_history,
         );
 
         (worker, input_tx, inject_tx)
@@ -230,6 +239,7 @@ impl Worker {
             brave_search_key,
             logs_dir,
             Some(input_rx),
+            Vec::new(), // initial_history - will be replaced by prior_history below
         );
         // Reuse the original worker ID so DB row stays linked.
         worker.id = existing_id;

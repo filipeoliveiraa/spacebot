@@ -1,7 +1,13 @@
+//! Portal API endpoints for conversation management.
+
 use super::state::ApiState;
 use crate::{
     InboundMessage, MessageContent,
-    conversation::{WebChatConversation, WebChatConversationStore, WebChatConversationSummary},
+    conversation::{
+        ConversationDefaultsResponse, ConversationSettings, DelegationMode, MemoryMode,
+        ModelOption, PortalConversation, PortalConversationStore, PortalConversationSummary,
+        WorkerContextMode,
+    },
 };
 
 use axum::Json;
@@ -12,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Deserialize, utoipa::ToSchema)]
-pub(super) struct WebChatSendRequest {
+pub(super) struct PortalSendRequest {
     agent_id: String,
     session_id: String,
     #[serde(default = "default_sender_name")]
@@ -25,12 +31,12 @@ fn default_sender_name() -> String {
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct WebChatSendResponse {
+pub(super) struct PortalSendResponse {
     ok: bool,
 }
 
 #[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub(super) struct WebChatHistoryQuery {
+pub(super) struct PortalHistoryQuery {
     agent_id: String,
     session_id: String,
     #[serde(default = "default_limit")]
@@ -42,14 +48,14 @@ fn default_limit() -> i64 {
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct WebChatHistoryMessage {
+pub(super) struct PortalHistoryMessage {
     id: String,
     role: String,
     content: String,
 }
 
 #[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub(super) struct WebChatConversationsQuery {
+pub(super) struct PortalConversationsQuery {
     agent_id: String,
     #[serde(default)]
     include_archived: bool,
@@ -62,60 +68,67 @@ fn default_conversation_limit() -> i64 {
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct WebChatConversationsResponse {
-    conversations: Vec<WebChatConversationSummary>,
+pub(super) struct PortalConversationsResponse {
+    conversations: Vec<PortalConversationSummary>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
-pub(super) struct CreateWebChatConversationRequest {
+pub(super) struct CreatePortalConversationRequest {
     agent_id: String,
     title: Option<String>,
+    settings: Option<ConversationSettings>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
-pub(super) struct WebChatConversationResponse {
-    conversation: WebChatConversation,
+pub(super) struct PortalConversationResponse {
+    conversation: PortalConversation,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
-pub(super) struct UpdateWebChatConversationRequest {
+pub(super) struct UpdatePortalConversationRequest {
     agent_id: String,
     title: Option<String>,
     archived: Option<bool>,
+    settings: Option<ConversationSettings>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
-pub(super) struct DeleteWebChatConversationQuery {
+pub(super) struct DeletePortalConversationQuery {
+    agent_id: String,
+}
+
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub(super) struct ConversationDefaultsQuery {
     agent_id: String,
 }
 
 fn conversation_store(
     state: &Arc<ApiState>,
     agent_id: &str,
-) -> Result<WebChatConversationStore, StatusCode> {
+) -> Result<PortalConversationStore, StatusCode> {
     let pools = state.agent_pools.load();
     let pool = pools.get(agent_id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(WebChatConversationStore::new(pool.clone()))
+    Ok(PortalConversationStore::new(pool.clone()))
 }
 
 /// Fire-and-forget message injection. The response arrives via the global SSE
 /// event bus (`/api/events`), same as every other channel.
 #[utoipa::path(
     post,
-    path = "/webchat/send",
-    request_body = WebChatSendRequest,
+    path = "/portal/send",
+    request_body = PortalSendRequest,
     responses(
-        (status = 200, body = WebChatSendResponse),
+        (status = 200, body = PortalSendResponse),
         (status = 400, description = "Invalid request"),
         (status = 404, description = "Agent not found"),
         (status = 503, description = "Messaging manager not available"),
     ),
-    tag = "webchat",
+    tag = "portal",
 )]
-pub(super) async fn webchat_send(
+pub(super) async fn portal_send(
     State(state): State<Arc<ApiState>>,
-    axum::Json(request): axum::Json<WebChatSendRequest>,
-) -> Result<Json<WebChatSendResponse>, StatusCode> {
+    axum::Json(request): axum::Json<PortalSendRequest>,
+) -> Result<Json<PortalSendResponse>, StatusCode> {
     let manager = state
         .messaging_manager
         .read()
@@ -128,14 +141,14 @@ pub(super) async fn webchat_send(
         .ensure(&request.agent_id, &request.session_id)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, session_id = %request.session_id, "failed to ensure webchat conversation");
+            tracing::warn!(%error, session_id = %request.session_id, "failed to ensure portal conversation");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     store
         .maybe_set_generated_title(&request.agent_id, &request.session_id, &request.message)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, session_id = %request.session_id, "failed to update generated webchat title");
+            tracing::warn!(%error, session_id = %request.session_id, "failed to update generated portal title");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -149,8 +162,8 @@ pub(super) async fn webchat_send(
 
     let inbound = InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
-        source: "webchat".into(),
-        adapter: Some("webchat".into()),
+        source: "portal".into(),
+        adapter: Some("portal".into()),
         conversation_id,
         sender_id: request.sender_name.clone(),
         agent_id: Some(request.agent_id.into()),
@@ -161,32 +174,32 @@ pub(super) async fn webchat_send(
     };
 
     manager.inject_message(inbound).await.map_err(|error| {
-        tracing::warn!(%error, "failed to inject webchat message");
+        tracing::warn!(%error, "failed to inject portal message");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok(Json(WebChatSendResponse { ok: true }))
+    Ok(Json(PortalSendResponse { ok: true }))
 }
 
 #[utoipa::path(
     get,
-    path = "/webchat/history",
+    path = "/portal/history",
     params(
         ("agent_id" = String, Query, description = "Agent ID"),
         ("session_id" = String, Query, description = "Session ID"),
         ("limit" = i64, Query, description = "Maximum number of messages to return (default: 100, max: 200)"),
     ),
     responses(
-        (status = 200, body = Vec<WebChatHistoryMessage>),
+        (status = 200, body = Vec<PortalHistoryMessage>),
         (status = 404, description = "Agent not found"),
         (status = 500, description = "Internal server error"),
     ),
-    tag = "webchat",
+    tag = "portal",
 )]
-pub(super) async fn webchat_history(
+pub(super) async fn portal_history(
     State(state): State<Arc<ApiState>>,
-    Query(query): Query<WebChatHistoryQuery>,
-) -> Result<Json<Vec<WebChatHistoryMessage>>, StatusCode> {
+    Query(query): Query<PortalHistoryQuery>,
+) -> Result<Json<Vec<PortalHistoryMessage>>, StatusCode> {
     let pools = state.agent_pools.load();
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
     let logger = crate::conversation::ConversationLogger::new(pool.clone());
@@ -197,13 +210,13 @@ pub(super) async fn webchat_history(
         .load_recent(&channel_id, query.limit.min(200))
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "failed to load webchat history");
+            tracing::warn!(%error, "failed to load portal history");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let result: Vec<WebChatHistoryMessage> = messages
+    let result: Vec<PortalHistoryMessage> = messages
         .into_iter()
-        .map(|message| WebChatHistoryMessage {
+        .map(|message| PortalHistoryMessage {
             id: message.id,
             role: message.role,
             content: message.content,
@@ -215,81 +228,81 @@ pub(super) async fn webchat_history(
 
 #[utoipa::path(
     get,
-    path = "/webchat/conversations",
+    path = "/portal/conversations",
     params(
         ("agent_id" = String, Query, description = "Agent ID"),
         ("include_archived" = bool, Query, description = "Include archived conversations"),
         ("limit" = i64, Query, description = "Maximum number of conversations to return (default: 100, max: 500)"),
     ),
     responses(
-        (status = 200, body = WebChatConversationsResponse),
+        (status = 200, body = PortalConversationsResponse),
         (status = 404, description = "Agent not found"),
         (status = 500, description = "Internal server error"),
     ),
-    tag = "webchat",
+    tag = "portal",
 )]
-pub(super) async fn list_webchat_conversations(
+pub(super) async fn list_portal_conversations(
     State(state): State<Arc<ApiState>>,
-    Query(query): Query<WebChatConversationsQuery>,
-) -> Result<Json<WebChatConversationsResponse>, StatusCode> {
+    Query(query): Query<PortalConversationsQuery>,
+) -> Result<Json<PortalConversationsResponse>, StatusCode> {
     let store = conversation_store(&state, &query.agent_id)?;
     let conversations = store
         .list(&query.agent_id, query.include_archived, query.limit)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %query.agent_id, "failed to list webchat conversations");
+            tracing::warn!(%error, agent_id = %query.agent_id, "failed to list portal conversations");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    Ok(Json(WebChatConversationsResponse { conversations }))
+    Ok(Json(PortalConversationsResponse { conversations }))
 }
 
 #[utoipa::path(
     post,
-    path = "/webchat/conversations",
-    request_body = CreateWebChatConversationRequest,
+    path = "/portal/conversations",
+    request_body = CreatePortalConversationRequest,
     responses(
-        (status = 200, body = WebChatConversationResponse),
+        (status = 200, body = PortalConversationResponse),
         (status = 404, description = "Agent not found"),
         (status = 500, description = "Internal server error"),
     ),
-    tag = "webchat",
+    tag = "portal",
 )]
-pub(super) async fn create_webchat_conversation(
+pub(super) async fn create_portal_conversation(
     State(state): State<Arc<ApiState>>,
-    Json(request): Json<CreateWebChatConversationRequest>,
-) -> Result<Json<WebChatConversationResponse>, StatusCode> {
+    Json(request): Json<CreatePortalConversationRequest>,
+) -> Result<Json<PortalConversationResponse>, StatusCode> {
     let store = conversation_store(&state, &request.agent_id)?;
     let conversation = store
-        .create(&request.agent_id, request.title.as_deref())
+        .create(&request.agent_id, request.title.as_deref(), request.settings)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %request.agent_id, "failed to create webchat conversation");
+            tracing::warn!(%error, agent_id = %request.agent_id, "failed to create portal conversation");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    Ok(Json(WebChatConversationResponse { conversation }))
+    Ok(Json(PortalConversationResponse { conversation }))
 }
 
 #[utoipa::path(
     put,
-    path = "/webchat/conversations/{session_id}",
-    request_body = UpdateWebChatConversationRequest,
+    path = "/portal/conversations/{session_id}",
+    request_body = UpdatePortalConversationRequest,
     params(
         ("session_id" = String, Path, description = "Conversation session ID"),
     ),
     responses(
-        (status = 200, body = WebChatConversationResponse),
+        (status = 200, body = PortalConversationResponse),
         (status = 404, description = "Conversation not found"),
         (status = 500, description = "Internal server error"),
     ),
-    tag = "webchat",
+    tag = "portal",
 )]
-pub(super) async fn update_webchat_conversation(
+pub(super) async fn update_portal_conversation(
     State(state): State<Arc<ApiState>>,
     Path(session_id): Path<String>,
-    Json(request): Json<UpdateWebChatConversationRequest>,
-) -> Result<Json<WebChatConversationResponse>, StatusCode> {
+    Json(request): Json<UpdatePortalConversationRequest>,
+) -> Result<Json<PortalConversationResponse>, StatusCode> {
     let store = conversation_store(&state, &request.agent_id)?;
     let conversation = store
         .update(
@@ -297,42 +310,43 @@ pub(super) async fn update_webchat_conversation(
             &session_id,
             request.title.as_deref(),
             request.archived,
+            request.settings,
         )
         .await
         .map_err(|error| {
-            tracing::warn!(%error, %session_id, "failed to update webchat conversation");
+            tracing::warn!(%error, %session_id, "failed to update portal conversation");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(WebChatConversationResponse { conversation }))
+    Ok(Json(PortalConversationResponse { conversation }))
 }
 
 #[utoipa::path(
     delete,
-    path = "/webchat/conversations/{session_id}",
+    path = "/portal/conversations/{session_id}",
     params(
         ("session_id" = String, Path, description = "Conversation session ID"),
         ("agent_id" = String, Query, description = "Agent ID"),
     ),
     responses(
-        (status = 200, body = WebChatSendResponse),
+        (status = 200, body = PortalSendResponse),
         (status = 404, description = "Conversation not found"),
         (status = 500, description = "Internal server error"),
     ),
-    tag = "webchat",
+    tag = "portal",
 )]
-pub(super) async fn delete_webchat_conversation(
+pub(super) async fn delete_portal_conversation(
     State(state): State<Arc<ApiState>>,
     Path(session_id): Path<String>,
-    Query(query): Query<DeleteWebChatConversationQuery>,
-) -> Result<Json<WebChatSendResponse>, StatusCode> {
+    Query(query): Query<DeletePortalConversationQuery>,
+) -> Result<Json<PortalSendResponse>, StatusCode> {
     let store = conversation_store(&state, &query.agent_id)?;
     let deleted = store
         .delete(&query.agent_id, &session_id)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, %session_id, "failed to delete webchat conversation");
+            tracing::warn!(%error, %session_id, "failed to delete portal conversation");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -340,5 +354,87 @@ pub(super) async fn delete_webchat_conversation(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    Ok(Json(WebChatSendResponse { ok: true }))
+    Ok(Json(PortalSendResponse { ok: true }))
+}
+
+/// Get conversation defaults for an agent.
+/// Returns the resolved default settings and available options for new conversations.
+#[utoipa::path(
+    get,
+    path = "/conversation-defaults",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = ConversationDefaultsResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "portal",
+)]
+pub(super) async fn conversation_defaults(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<ConversationDefaultsQuery>,
+) -> Result<Json<ConversationDefaultsResponse>, StatusCode> {
+    // Verify agent exists by checking agent_configs
+    let agent_configs = state.agent_configs.load();
+    let agent_exists = agent_configs.iter().any(|a| a.id == query.agent_id);
+    if !agent_exists {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Default model (placeholder - in Phase 2 will be resolved from agent config)
+    let default_model = "anthropic/claude-sonnet-4".to_string();
+
+    // Build available models list
+    let available_models = vec![
+        ModelOption {
+            id: "anthropic/claude-sonnet-4".to_string(),
+            name: "Claude Sonnet 4".to_string(),
+            provider: "anthropic".to_string(),
+            context_window: 200_000,
+            supports_tools: true,
+            supports_thinking: true,
+        },
+        ModelOption {
+            id: "anthropic/claude-opus-4".to_string(),
+            name: "Claude Opus 4".to_string(),
+            provider: "anthropic".to_string(),
+            context_window: 200_000,
+            supports_tools: true,
+            supports_thinking: true,
+        },
+        ModelOption {
+            id: "anthropic/claude-haiku-4.5".to_string(),
+            name: "Claude Haiku 4.5".to_string(),
+            provider: "anthropic".to_string(),
+            context_window: 128_000,
+            supports_tools: true,
+            supports_thinking: false,
+        },
+    ];
+
+    let response = ConversationDefaultsResponse {
+        model: default_model,
+        memory: MemoryMode::Full,
+        delegation: DelegationMode::Standard,
+        worker_context: WorkerContextMode::default(),
+        available_models,
+        memory_modes: vec!["full".to_string(), "ambient".to_string(), "off".to_string()],
+        delegation_modes: vec!["standard".to_string(), "direct".to_string()],
+        worker_history_modes: vec![
+            "none".to_string(),
+            "summary".to_string(),
+            "recent".to_string(),
+            "full".to_string(),
+        ],
+        worker_memory_modes: vec![
+            "none".to_string(),
+            "ambient".to_string(),
+            "tools".to_string(),
+            "full".to_string(),
+        ],
+    };
+
+    Ok(Json(response))
 }

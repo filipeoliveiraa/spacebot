@@ -1,7 +1,8 @@
 import type {
-  WebChatConversationResponse,
-  WebChatConversationsResponse,
-  WebChatHistoryMessage,
+  PortalConversationResponse,
+  PortalConversationsResponse,
+  PortalHistoryMessage,
+  ConversationDefaultsResponse,
   HealthResponse,
   MemoriesListResponse,
   MessagesResponse,
@@ -76,14 +77,14 @@ export const apiClient = {
     );
   },
 
-  webchatHistory(agentId: string, sessionId: string, limit = 100) {
+  portalHistory(agentId: string, sessionId: string, limit = 100) {
     const params = new URLSearchParams({
       agent_id: agentId,
       session_id: sessionId,
       limit: String(limit),
     });
-    return request<WebChatHistoryMessage[]>(
-      `/webchat/history?${params.toString()}`,
+    return request<PortalHistoryMessage[]>(
+      `/portal/history?${params.toString()}`,
     );
   },
 
@@ -100,13 +101,13 @@ export const apiClient = {
     return request<MessagesResponse>(`/channels/messages?${params.toString()}`);
   },
 
-  webchatSend(input: {
+  portalSend(input: {
     agentId: string;
     sessionId: string;
     senderName?: string;
     message: string;
   }) {
-    return request<{ ok: boolean }>("/webchat/send", {
+    return request<{ ok: boolean }>("/portal/send", {
       method: "POST",
       body: JSON.stringify({
         agent_id: input.agentId,
@@ -117,7 +118,7 @@ export const apiClient = {
     });
   },
 
-  listWebchatConversations(
+  listPortalConversations(
     agentId: string,
     includeArchived = false,
     limit = 100,
@@ -127,13 +128,13 @@ export const apiClient = {
       include_archived: includeArchived ? "true" : "false",
       limit: String(limit),
     });
-    return request<WebChatConversationsResponse>(
-      `/webchat/conversations?${params.toString()}`,
+    return request<PortalConversationsResponse>(
+      `/portal/conversations?${params.toString()}`,
     );
   },
 
-  createWebchatConversation(input: { agentId: string; title?: string | null }) {
-    return request<WebChatConversationResponse>("/webchat/conversations", {
+  createPortalConversation(input: { agentId: string; title?: string | null }) {
+    return request<PortalConversationResponse>("/portal/conversations", {
       method: "POST",
       body: JSON.stringify({
         agent_id: input.agentId,
@@ -142,14 +143,14 @@ export const apiClient = {
     });
   },
 
-  updateWebchatConversation(input: {
+  updatePortalConversation(input: {
     agentId: string;
     sessionId: string;
     title?: string | null;
     archived?: boolean;
   }) {
-    return request<WebChatConversationResponse>(
-      `/webchat/conversations/${encodeURIComponent(input.sessionId)}`,
+    return request<PortalConversationResponse>(
+      `/portal/conversations/${encodeURIComponent(input.sessionId)}`,
       {
         method: "PUT",
         body: JSON.stringify({
@@ -161,14 +162,18 @@ export const apiClient = {
     );
   },
 
-  deleteWebchatConversation(agentId: string, sessionId: string) {
+  deletePortalConversation(agentId: string, sessionId: string) {
     const params = new URLSearchParams({ agent_id: agentId });
     return request<{ ok: boolean }>(
-      `/webchat/conversations/${encodeURIComponent(sessionId)}?${params.toString()}`,
+      `/portal/conversations/${encodeURIComponent(sessionId)}?${params.toString()}`,
       {
         method: "DELETE",
       },
     );
+  },
+
+  getConversationDefaults(agentId: string) {
+    return request<ConversationDefaultsResponse>(`/conversation-defaults?agent_id=${encodeURIComponent(agentId)}`);
   },
 
   listTasks(agentId: string, limit = 20) {

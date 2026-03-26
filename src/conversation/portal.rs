@@ -1,20 +1,22 @@
-//! Webchat conversation persistence (SQLite).
+//! Portal conversation persistence (SQLite).
 
+use super::settings::ConversationSettings;
 use sqlx::{Row as _, SqlitePool};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct WebChatConversation {
+pub struct PortalConversation {
     pub id: String,
     pub agent_id: String,
     pub title: String,
     pub title_source: String,
     pub archived: bool,
+    pub settings: Option<ConversationSettings>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-pub struct WebChatConversationSummary {
+pub struct PortalConversationSummary {
     pub id: String,
     pub agent_id: String,
     pub title: String,
@@ -26,14 +28,15 @@ pub struct WebChatConversationSummary {
     pub last_message_preview: Option<String>,
     pub last_message_role: Option<String>,
     pub message_count: i64,
+    pub settings: Option<ConversationSettings>,
 }
 
 #[derive(Debug, Clone)]
-pub struct WebChatConversationStore {
+pub struct PortalConversationStore {
     pool: SqlitePool,
 }
 
-impl WebChatConversationStore {
+impl PortalConversationStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
@@ -42,7 +45,8 @@ impl WebChatConversationStore {
         &self,
         agent_id: &str,
         title: Option<&str>,
-    ) -> crate::error::Result<WebChatConversation> {
+        settings: Option<ConversationSettings>,
+    ) -> crate::error::Result<PortalConversation> {
         let id = format!("portal:chat:{agent_id}:{}", uuid::Uuid::new_v4());
         let title = normalize_title(title).unwrap_or_else(default_title);
         let title_source = if title == default_title() {
@@ -52,12 +56,13 @@ impl WebChatConversationStore {
         };
 
         sqlx::query(
-            "INSERT INTO webchat_conversations (id, agent_id, title, title_source) VALUES (?, ?, ?, ?)",
+            "INSERT INTO portal_conversations (id, agent_id, title, title_source, settings) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(agent_id)
         .bind(&title)
         .bind(title_source)
+        .bind(settings.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()))
         .execute(&self.pool)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -65,16 +70,16 @@ impl WebChatConversationStore {
         Ok(self
             .get(agent_id, &id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("newly created webchat conversation missing"))?)
+            .ok_or_else(|| anyhow::anyhow!("newly created portal conversation missing"))?)
     }
 
     pub async fn ensure(
         &self,
         agent_id: &str,
         session_id: &str,
-    ) -> crate::error::Result<WebChatConversation> {
+    ) -> crate::error::Result<PortalConversation> {
         sqlx::query(
-            "INSERT INTO webchat_conversations (id, agent_id, title, title_source) VALUES (?, ?, ?, 'system') \
+            "INSERT INTO portal_conversations (id, agent_id, title, title_source, settings) VALUES (?, ?, ?, 'system', NULL) \
              ON CONFLICT(id) DO NOTHING",
         )
         .bind(session_id)
@@ -87,17 +92,17 @@ impl WebChatConversationStore {
         Ok(self
             .get(agent_id, session_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("ensured webchat conversation missing"))?)
+            .ok_or_else(|| anyhow::anyhow!("ensured portal conversation missing"))?)
     }
 
     pub async fn get(
         &self,
         agent_id: &str,
         session_id: &str,
-    ) -> crate::error::Result<Option<WebChatConversation>> {
+    ) -> crate::error::Result<Option<PortalConversation>> {
         let row = sqlx::query(
-            "SELECT id, agent_id, title, title_source, archived, created_at, updated_at \
-             FROM webchat_conversations WHERE agent_id = ? AND id = ?",
+            "SELECT id, agent_id, title, title_source, archived, settings, created_at, updated_at \
+             FROM portal_conversations WHERE agent_id = ? AND id = ?",
         )
         .bind(agent_id)
         .bind(session_id)
@@ -113,17 +118,17 @@ impl WebChatConversationStore {
         agent_id: &str,
         include_archived: bool,
         limit: i64,
-    ) -> crate::error::Result<Vec<WebChatConversationSummary>> {
+    ) -> crate::error::Result<Vec<PortalConversationSummary>> {
         self.backfill_from_messages(agent_id).await?;
 
         let rows = sqlx::query(
             "SELECT \
-                c.id, c.agent_id, c.title, c.title_source, c.archived, c.created_at, c.updated_at, \
+                c.id, c.agent_id, c.title, c.title_source, c.archived, c.settings, c.created_at, c.updated_at, \
                 (SELECT MAX(created_at) FROM conversation_messages WHERE channel_id = c.id) as last_message_at, \
                 (SELECT content FROM conversation_messages WHERE channel_id = c.id ORDER BY created_at DESC LIMIT 1) as last_message_preview, \
                 (SELECT role FROM conversation_messages WHERE channel_id = c.id ORDER BY created_at DESC LIMIT 1) as last_message_role, \
                 (SELECT COUNT(*) FROM conversation_messages WHERE channel_id = c.id) as message_count \
-             FROM webchat_conversations c \
+             FROM portal_conversations c \
              WHERE c.agent_id = ? AND (? = 1 OR c.archived = 0) \
              ORDER BY COALESCE((SELECT MAX(created_at) FROM conversation_messages WHERE channel_id = c.id), c.updated_at, c.created_at) DESC \
              LIMIT ?",
@@ -144,25 +149,31 @@ impl WebChatConversationStore {
         session_id: &str,
         title: Option<&str>,
         archived: Option<bool>,
-    ) -> crate::error::Result<Option<WebChatConversation>> {
-        if title.is_none() && archived.is_none() {
+        settings: Option<ConversationSettings>,
+    ) -> crate::error::Result<Option<PortalConversation>> {
+        if title.is_none() && archived.is_none() && settings.is_none() {
             return self.get(agent_id, session_id).await;
         }
 
         let title = normalize_title(title);
         let title_source = title.as_ref().map(|_| "user");
+        let settings_json = settings
+            .as_ref()
+            .map(|s| serde_json::to_string(s).unwrap_or_default());
 
         let result = sqlx::query(
-            "UPDATE webchat_conversations \
+            "UPDATE portal_conversations \
              SET title = COALESCE(?, title), \
                  title_source = COALESCE(?, title_source), \
                  archived = COALESCE(?, archived), \
+                 settings = COALESCE(?, settings), \
                  updated_at = CURRENT_TIMESTAMP \
              WHERE agent_id = ? AND id = ?",
         )
         .bind(title.as_deref())
         .bind(title_source)
         .bind(archived.map(|value| if value { 1_i64 } else { 0_i64 }))
+        .bind(settings_json.as_deref())
         .bind(agent_id)
         .bind(session_id)
         .execute(&self.pool)
@@ -189,7 +200,7 @@ impl WebChatConversationStore {
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
 
-        let result = sqlx::query("DELETE FROM webchat_conversations WHERE agent_id = ? AND id = ?")
+        let result = sqlx::query("DELETE FROM portal_conversations WHERE agent_id = ? AND id = ?")
             .bind(agent_id)
             .bind(session_id)
             .execute(&mut *tx)
@@ -210,7 +221,7 @@ impl WebChatConversationStore {
         let generated_title = generate_title(content);
 
         sqlx::query(
-            "UPDATE webchat_conversations \
+            "UPDATE portal_conversations \
              SET title = ?, updated_at = CURRENT_TIMESTAMP \
              WHERE agent_id = ? AND id = ? AND title_source = 'system' AND title = ?",
         )
@@ -264,7 +275,7 @@ impl WebChatConversationStore {
             };
 
             sqlx::query(
-                "INSERT INTO webchat_conversations (id, agent_id, title, title_source) VALUES (?, ?, ?, ?) \
+                "INSERT INTO portal_conversations (id, agent_id, title, title_source, settings) VALUES (?, ?, ?, ?, NULL) \
                  ON CONFLICT(id) DO NOTHING",
             )
             .bind(&channel_id)
@@ -280,8 +291,8 @@ impl WebChatConversationStore {
     }
 }
 
-fn row_to_conversation(row: sqlx::sqlite::SqliteRow) -> WebChatConversation {
-    WebChatConversation {
+fn row_to_conversation(row: sqlx::sqlite::SqliteRow) -> PortalConversation {
+    PortalConversation {
         id: row.try_get("id").unwrap_or_default(),
         agent_id: row.try_get("agent_id").unwrap_or_default(),
         title: row.try_get("title").unwrap_or_else(|_| default_title()),
@@ -289,6 +300,13 @@ fn row_to_conversation(row: sqlx::sqlite::SqliteRow) -> WebChatConversation {
             .try_get("title_source")
             .unwrap_or_else(|_| "system".to_string()),
         archived: row.try_get::<i64, _>("archived").unwrap_or(0) == 1,
+        settings: row.try_get::<String, _>("settings").ok().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                serde_json::from_str(&s).ok()
+            }
+        }),
         created_at: row
             .try_get("created_at")
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -298,8 +316,8 @@ fn row_to_conversation(row: sqlx::sqlite::SqliteRow) -> WebChatConversation {
     }
 }
 
-fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> WebChatConversationSummary {
-    WebChatConversationSummary {
+fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> PortalConversationSummary {
+    PortalConversationSummary {
         id: row.try_get("id").unwrap_or_default(),
         agent_id: row.try_get("agent_id").unwrap_or_default(),
         title: row.try_get("title").unwrap_or_else(|_| default_title()),
@@ -317,6 +335,13 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> WebChatConversationSummary {
         last_message_preview: row.try_get("last_message_preview").ok().flatten(),
         last_message_role: row.try_get("last_message_role").ok().flatten(),
         message_count: row.try_get("message_count").unwrap_or(0),
+        settings: row.try_get::<String, _>("settings").ok().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                serde_json::from_str(&s).ok()
+            }
+        }),
     }
 }
 

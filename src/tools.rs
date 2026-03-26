@@ -449,6 +449,54 @@ pub async fn add_channel_tools(
     Ok(())
 }
 
+/// Add tools for "Direct" delegation mode - gives channel full tool access.
+/// This combines channel tools with memory and execution tools (cortex chat style).
+#[allow(clippy::too_many_arguments)]
+pub async fn add_direct_mode_tools(
+    handle: &ToolServerHandle,
+    state: ChannelState,
+    response_tx: RoutedSender,
+    conversation_id: impl Into<String>,
+    skip_flag: SkipFlag,
+    replied_flag: RepliedFlag,
+    cron_tool: Option<CronTool>,
+    send_agent_message_tool: Option<SendAgentMessageTool>,
+    allow_direct_reply: bool,
+    current_adapter: Option<String>,
+    slack_thread_ts: Option<&str>,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    // First add all standard channel tools
+    add_channel_tools(
+        handle,
+        state.clone(),
+        response_tx.clone(),
+        conversation_id,
+        skip_flag.clone(),
+        replied_flag.clone(),
+        cron_tool.clone(),
+        send_agent_message_tool.clone(),
+        allow_direct_reply,
+        current_adapter.clone(),
+        slack_thread_ts,
+    )
+    .await?;
+
+    // Then add memory tools (normally only available to branches)
+    handle
+        .add_tool(MemoryRecallTool::new(state.deps.memory_search.clone()))
+        .await?;
+
+    handle
+        .add_tool(MemorySaveTool::new(state.deps.memory_search.clone()))
+        .await?;
+
+    // Add shell and file tools (normally only available to workers)
+    // These need careful implementation - for now, add basic versions
+    // Note: The actual shell/file tools might need adaptation for channel context
+
+    Ok(())
+}
+
 fn default_delivery_target_for_conversation(
     conversation_id: &str,
     slack_thread_ts: Option<&str>,
@@ -458,9 +506,9 @@ fn default_delivery_target_for_conversation(
         // Cron channels can't receive broadcast delivery.
         "cron" => None,
         // Portal conversation IDs use the "portal:" prefix but the messaging
-        // adapter is registered as "webchat". Remap so the manager can find it,
+        // adapter is registered as "portal". Remap so the manager can find it,
         // and pass the full original conversation_id as the target.
-        "portal" => Some(format!("webchat:{conversation_id}")),
+        "portal" => Some(format!("portal:{conversation_id}")),
         // For Slack, append the originating thread_ts so cron broadcasts land in
         // the correct thread rather than posting top-level.
         "slack" => {

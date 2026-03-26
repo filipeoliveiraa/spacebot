@@ -1567,8 +1567,8 @@ impl Binding {
             return false;
         }
 
-        // For webchat messages, match based on agent_id in the message
-        if message.source == "webchat"
+        // For portal messages, match based on agent_id in the message
+        if message.source == "portal"
             && let Some(message_agent_id) = &message.agent_id
         {
             return message_agent_id.as_ref() == self.agent_id;

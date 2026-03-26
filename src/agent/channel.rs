@@ -15,6 +15,7 @@ use crate::agent::compactor::Compactor;
 use crate::agent::process_control::ControlActionResult;
 use crate::agent::status::{StatusBlock, SystemInfo};
 use crate::agent::worker::Worker;
+use crate::conversation::settings::{DelegationMode, MemoryMode, ResolvedConversationSettings};
 use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
@@ -124,6 +125,9 @@ pub struct ChannelState {
     /// `ToolStarted`/`ToolCompleted` events as they flow through the system.
     /// Defaults to a standalone empty map when the API layer is not active.
     pub live_worker_transcripts: LiveWorkerTranscripts,
+    /// Worker context settings inherited from conversation settings.
+    /// Determines what context workers spawned from this channel receive.
+    pub worker_context_settings: Arc<RwLock<crate::conversation::settings::WorkerContextMode>>,
 }
 
 impl ChannelState {
@@ -455,6 +459,8 @@ pub struct Channel {
     listen_only_session_override: Option<bool>,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
+    /// Per-conversation resolved settings (memory mode, delegation mode, model override).
+    pub resolved_settings: ResolvedConversationSettings,
 }
 
 /// RAII guard that records `message_handling_duration_seconds` when dropped,
@@ -493,6 +499,7 @@ impl Channel {
         logs_dir: std::path::PathBuf,
         prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
         live_worker_transcripts: Option<LiveWorkerTranscripts>,
+        resolved_settings: ResolvedConversationSettings,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(
@@ -534,6 +541,9 @@ impl Channel {
             prompt_snapshot_store,
             live_worker_transcripts: live_worker_transcripts
                 .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new()))),
+            worker_context_settings: Arc::new(RwLock::new(
+                resolved_settings.worker_context.clone(),
+            )),
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -592,6 +602,7 @@ impl Channel {
             listen_only_mode: resolved_listen_only_mode,
             listen_only_session_override: None,
             control_handle,
+            resolved_settings,
         };
 
         (channel, message_tx)
@@ -2223,52 +2234,70 @@ impl Channel {
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
-        // Render working memory layers (Layers 2 + 3).
-        let wm_config = **rc.working_memory.load();
-        let timezone = self.deps.working_memory.timezone();
-        let working_memory = match crate::memory::working::render_working_memory(
-            &self.deps.working_memory,
-            self.id.as_ref(),
-            &wm_config,
-            timezone,
-        )
-        .await
-        {
-            Ok(text) => {
-                if text.is_empty() {
-                    tracing::debug!(channel_id = %self.id, "working memory rendered empty (disabled?)");
-                } else {
-                    tracing::debug!(channel_id = %self.id, len = text.len(), "working memory rendered");
+        // Only inject memory context if not in Off mode
+        let (working_memory, channel_activity_map, memory_bulletin_text) = if matches!(
+            self.resolved_settings.memory,
+            MemoryMode::Off
+        ) {
+            (String::new(), String::new(), None)
+        } else {
+            // Render working memory layers (Layers 2 + 3).
+            let wm_config = **rc.working_memory.load();
+            let timezone = self.deps.working_memory.timezone();
+            let working_memory = match crate::memory::working::render_working_memory(
+                &self.deps.working_memory,
+                self.id.as_ref(),
+                &wm_config,
+                timezone,
+            )
+            .await
+            {
+                Ok(text) => {
+                    if text.is_empty() {
+                        tracing::debug!(channel_id = %self.id, "working memory rendered empty (disabled?)");
+                    } else {
+                        tracing::debug!(channel_id = %self.id, len = text.len(), "working memory rendered");
+                    }
+                    text
                 }
-                text
-            }
-            Err(error) => {
-                tracing::warn!(channel_id = %self.id, %error, "working memory render failed");
-                String::new()
-            }
-        };
+                Err(error) => {
+                    tracing::warn!(channel_id = %self.id, %error, "working memory render failed");
+                    String::new()
+                }
+            };
 
-        let channel_activity_map = match crate::memory::working::render_channel_activity_map(
-            &self.deps.sqlite_pool,
-            &self.deps.working_memory,
-            self.id.as_ref(),
-            &wm_config,
-            timezone,
-        )
-        .await
-        {
-            Ok(text) => text,
-            Err(error) => {
-                tracing::warn!(channel_id = %self.id, %error, "channel activity map render failed");
-                String::new()
-            }
+            let channel_activity_map = match crate::memory::working::render_channel_activity_map(
+                &self.deps.sqlite_pool,
+                &self.deps.working_memory,
+                self.id.as_ref(),
+                &wm_config,
+                timezone,
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::warn!(channel_id = %self.id, %error, "channel activity map render failed");
+                    String::new()
+                }
+            };
+
+            // In Ambient mode, we still show memory but don't trigger persistence
+            let memory_bulletin_text =
+                if matches!(self.resolved_settings.memory, MemoryMode::Ambient) {
+                    Some(memory_bulletin.to_string())
+                } else {
+                    Some(memory_bulletin.to_string())
+                };
+
+            (working_memory, channel_activity_map, memory_bulletin_text)
         };
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
         prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
-            empty_to_none(memory_bulletin.to_string()),
+            memory_bulletin_text,
             empty_to_none(skills_prompt),
             worker_capabilities,
             self.conversation_context.clone(),
@@ -2329,23 +2358,50 @@ impl Channel {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        if let Err(error) = crate::tools::add_channel_tools(
-            &self.tool_server,
-            self.state.clone(),
-            routed_sender,
-            conversation_id,
-            skip_flag.clone(),
-            replied_flag.clone(),
-            self.deps.cron_tool.clone(),
-            send_agent_message_tool,
-            allow_direct_reply,
-            adapter.map(|s| s.to_string()),
-            slack_thread_ts.as_deref(),
-        )
-        .await
-        {
-            tracing::error!(%error, "failed to add channel tools");
-            return Err(AgentError::Other(error.into()).into());
+        // Add tools based on delegation mode
+        match self.resolved_settings.delegation {
+            DelegationMode::Standard => {
+                // Current behavior - standard channel tools only
+                if let Err(error) = crate::tools::add_channel_tools(
+                    &self.tool_server,
+                    self.state.clone(),
+                    routed_sender,
+                    conversation_id,
+                    skip_flag.clone(),
+                    replied_flag.clone(),
+                    self.deps.cron_tool.clone(),
+                    send_agent_message_tool,
+                    allow_direct_reply,
+                    adapter.map(|s| s.to_string()),
+                    slack_thread_ts.as_deref(),
+                )
+                .await
+                {
+                    tracing::error!(%error, "failed to add channel tools");
+                    return Err(AgentError::Other(error.into()).into());
+                }
+            }
+            DelegationMode::Direct => {
+                // Full tool access (cortex chat style)
+                if let Err(error) = crate::tools::add_direct_mode_tools(
+                    &self.tool_server,
+                    self.state.clone(),
+                    routed_sender,
+                    conversation_id,
+                    skip_flag.clone(),
+                    replied_flag.clone(),
+                    self.deps.cron_tool.clone(),
+                    send_agent_message_tool,
+                    allow_direct_reply,
+                    adapter.map(|s| s.to_string()),
+                    slack_thread_ts.as_deref(),
+                )
+                .await
+                {
+                    tracing::error!(%error, "failed to add direct mode tools");
+                    return Err(AgentError::Other(error.into()).into());
+                }
+            }
         }
 
         let rc = &self.deps.runtime_config;
@@ -2355,7 +2411,14 @@ impl Channel {
         } else {
             **rc.max_turns.load()
         };
-        let model_name = routing.resolve(ProcessType::Channel, None);
+
+        // Check for model override from conversation settings
+        let model_name = if let Some(ref override_model) = self.resolved_settings.model {
+            override_model.as_str()
+        } else {
+            routing.resolve(ProcessType::Channel, None)
+        };
+
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
             .with_context(&*self.deps.agent_id, "channel")
             .with_routing((**routing).clone());

@@ -106,17 +106,70 @@ export type WarmupTriggerResponse =
 // Webchat conversations
 export type WebChatConversation = components["schemas"]["WebChatConversation"];
 export type WebChatConversationSummary =
-  components["schemas"]["WebChatConversationSummary"];
+	components["schemas"]["WebChatConversationSummary"];
 export type WebChatConversationsResponse =
-  components["schemas"]["WebChatConversationsResponse"];
+	components["schemas"]["WebChatConversationsResponse"];
 export type WebChatConversationResponse =
-  components["schemas"]["WebChatConversationResponse"];
+	components["schemas"]["WebChatConversationResponse"];
 export type CreateWebChatConversationRequest =
-  components["schemas"]["CreateWebChatConversationRequest"];
+	components["schemas"]["CreateWebChatConversationRequest"];
 export type UpdateWebChatConversationRequest =
-  components["schemas"]["UpdateWebChatConversationRequest"];
+	components["schemas"]["UpdateWebChatConversationRequest"];
 export type WebChatHistoryMessage =
-  components["schemas"]["WebChatHistoryMessage"];
+	components["schemas"]["WebChatHistoryMessage"];
+
+// Conversation Settings
+export type ConversationSettings = {
+	model?: string | null;
+	memory?: "full" | "ambient" | "off";
+	delegation?: "standard" | "direct";
+	worker_context?: {
+		history?: "none" | "summary" | "recent" | "full";
+		memory?: "none" | "ambient" | "tools" | "full";
+	};
+};
+
+export type ConversationDefaultsResponse = {
+	model: string;
+	memory: "full" | "ambient" | "off";
+	delegation: "standard" | "direct";
+	worker_context: {
+		history: "none" | "summary" | "recent" | "full";
+		memory: "none" | "ambient" | "tools" | "full";
+	};
+	available_models: Array<{
+		id: string;
+		name: string;
+		provider: string;
+		context_window: number;
+		supports_tools: boolean;
+		supports_thinking: boolean;
+	}>;
+	memory_modes: string[];
+	delegation_modes: string[];
+	worker_history_modes: string[];
+	worker_memory_modes: string[];
+};
+
+// Portal conversations (renamed from webchat)
+export type PortalConversation = components["schemas"]["WebChatConversation"];
+export type PortalConversationSummary = components["schemas"]["WebChatConversationSummary"];
+export type PortalConversationsResponse = components["schemas"]["WebChatConversationsResponse"];
+export type PortalConversationResponse = components["schemas"]["WebChatConversationResponse"];
+export type CreatePortalConversationRequest = {
+	agent_id: string;
+	title?: string | null;
+	settings?: ConversationSettings | null;
+};
+export type UpdatePortalConversationRequest = {
+	agent_id: string;
+	title?: string | null;
+	archived?: boolean | null;
+	settings?: ConversationSettings | null;
+};
+export type PortalHistoryMessage = components["schemas"]["WebChatHistoryMessage"];
+export type PortalSendRequest = components["schemas"]["WebChatSendRequest"];
+export type PortalSendResponse = components["schemas"]["WebChatSendResponse"];
 
 // Activity
 export type ActivityDayCount = components["schemas"]["ActivityDayCount"];

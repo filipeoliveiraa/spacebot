@@ -3329,6 +3329,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         screenshot_dir,
         brave_search_key,
         logs_dir,
+        Vec::new(), // no initial history for cortex task workers
     );
 
     // Detached workers are not channel-owned, so injection senders are not

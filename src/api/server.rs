@@ -3,8 +3,8 @@
 use super::state::ApiState;
 use super::{
     agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
-    messaging, models, opencode_proxy, projects, providers, secrets, settings, skills, ssh, system,
-    tasks, tools, webchat, workers,
+    messaging, models, opencode_proxy, portal, projects, providers, secrets, settings, skills, ssh,
+    system, tasks, tools, workers,
 };
 
 use axum::Json;
@@ -214,13 +214,14 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         // SSH routes
         .routes(routes!(ssh::set_authorized_key))
         .routes(routes!(ssh::ssh_status))
-        // Webchat routes
-        .routes(routes!(webchat::webchat_send))
-        .routes(routes!(webchat::webchat_history))
-        .routes(routes!(webchat::list_webchat_conversations))
-        .routes(routes!(webchat::create_webchat_conversation))
-        .routes(routes!(webchat::update_webchat_conversation))
-        .routes(routes!(webchat::delete_webchat_conversation))
+        // Portal routes
+        .routes(routes!(portal::portal_send))
+        .routes(routes!(portal::portal_history))
+        .routes(routes!(portal::list_portal_conversations))
+        .routes(routes!(portal::create_portal_conversation))
+        .routes(routes!(portal::update_portal_conversation))
+        .routes(routes!(portal::delete_portal_conversation))
+        .routes(routes!(portal::conversation_defaults))
         // Link routes
         .routes(routes!(links::list_links, links::create_link))
         .routes(routes!(links::update_link, links::delete_link))

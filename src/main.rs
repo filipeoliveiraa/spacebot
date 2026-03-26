@@ -1928,6 +1928,7 @@ async fn run(
                         agent.config.logs_dir(),
                         snapshot_store,
                         Some(api_state.live_worker_transcripts.clone()),
+                        spacebot::conversation::settings::ResolvedConversationSettings::default(),
                     );
                     let channel_registration_id = agent
                         .deps
@@ -2136,6 +2137,7 @@ async fn run(
                         agent.config.logs_dir(),
                         snapshot_store,
                         Some(api_state.live_worker_transcripts.clone()),
+                        spacebot::conversation::settings::ResolvedConversationSettings::default(),
                     );
                     let channel_registration_id = agent
                         .deps
@@ -3353,18 +3355,18 @@ async fn initialize_agents(
         }
     }
 
-    let webchat_agent_pools = agents
+    let portal_agent_pools = agents
         .iter()
         .map(|(agent_id, agent)| (agent_id.to_string(), agent.db.sqlite.clone()))
         .collect();
-    let webchat_adapter = Arc::new(spacebot::messaging::webchat::WebChatAdapter::new(
-        webchat_agent_pools,
+    let portal_adapter = Arc::new(spacebot::messaging::portal::PortalAdapter::new(
+        portal_agent_pools,
     ));
-    webchat_adapter.set_event_tx(api_state.event_tx.clone());
+    portal_adapter.set_event_tx(api_state.event_tx.clone());
     new_messaging_manager
-        .register_shared(webchat_adapter.clone())
+        .register_shared(portal_adapter.clone())
         .await;
-    api_state.set_webchat_adapter(webchat_adapter);
+    api_state.set_portal_adapter(portal_adapter);
 
     *messaging_manager = Arc::new(new_messaging_manager);
     api_state
