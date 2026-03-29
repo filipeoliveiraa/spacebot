@@ -2055,6 +2055,19 @@ export const api = {
 	getConversationDefaults: (agentId: string) =>
 		fetchJson<Types.ConversationDefaultsResponse>(`/conversation-defaults?agent_id=${encodeURIComponent(agentId)}`),
 
+	// Channel settings API
+	getChannelSettings: (channelId: string, agentId: string) =>
+		fetchJson<{ conversation_id: string; settings: Types.ConversationSettings }>(
+			`/channels/${encodeURIComponent(channelId)}/settings?agent_id=${encodeURIComponent(agentId)}`
+		),
+
+	updateChannelSettings: (channelId: string, agentId: string, settings: Types.ConversationSettings) =>
+		fetch(`${getApiBase()}/channels/${encodeURIComponent(channelId)}/settings`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, settings }),
+		}),
+
 	// Tasks API
 	listTasks: (params?: { agent_id?: string; owner_agent_id?: string; assigned_agent_id?: string; status?: TaskStatus; priority?: TaskPriority; created_by?: string; limit?: number }) => {
 		const search = new URLSearchParams();

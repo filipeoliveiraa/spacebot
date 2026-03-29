@@ -92,6 +92,10 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(channels::list_prompt_snapshots))
         .routes(routes!(channels::get_prompt_snapshot))
         .routes(routes!(channels::cancel_process))
+        .routes(routes!(
+            channels::get_channel_settings,
+            channels::update_channel_settings
+        ))
         // Worker routes
         .routes(routes!(workers::list_workers))
         .routes(routes!(workers::worker_detail))

@@ -15,7 +15,9 @@ use crate::agent::compactor::Compactor;
 use crate::agent::process_control::ControlActionResult;
 use crate::agent::status::{StatusBlock, SystemInfo};
 use crate::agent::worker::Worker;
-use crate::conversation::settings::{DelegationMode, MemoryMode, ResolvedConversationSettings};
+use crate::conversation::settings::{
+    DelegationMode, MemoryMode, ResolvedConversationSettings, ResponseMode,
+};
 use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
@@ -579,7 +581,10 @@ impl Channel {
         };
 
         let self_tx = message_tx.clone();
-        let resolved_listen_only_mode = deps.runtime_config.channel_config.load().listen_only_mode;
+        // Derive listen_only_mode from response_mode. In Phase 4 cleanup,
+        // all listen_only_mode references will be replaced by response_mode checks.
+        let resolved_listen_only_mode =
+            !matches!(resolved_settings.response_mode, ResponseMode::Active);
         let control_handle = ChannelControlHandle::new(state.clone());
         let channel = Self {
             id: id.clone(),
@@ -717,6 +722,30 @@ impl Channel {
         self.listen_only_mode = enabled;
         self.listen_only_session_override = if persisted { None } else { Some(enabled) };
         persisted
+    }
+
+    /// Update the response mode and persist to the channel_settings table.
+    async fn set_response_mode(&mut self, mode: ResponseMode) {
+        self.resolved_settings.response_mode = mode;
+        self.listen_only_mode = !matches!(mode, ResponseMode::Active);
+
+        // Persist to channel_settings table
+        let store = crate::conversation::ChannelSettingsStore::new(self.deps.sqlite_pool.clone());
+        let settings = crate::conversation::ConversationSettings {
+            response_mode: mode,
+            ..Default::default()
+        };
+        if let Err(error) = store
+            .upsert(&self.deps.agent_id, self.id.as_ref(), &settings)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                channel_id = %self.id,
+                ?mode,
+                "failed to persist response_mode to channel_settings"
+            );
+        }
     }
 
     fn persist_inbound_user_message(
@@ -893,10 +922,10 @@ impl Channel {
                 let routing = self.deps.runtime_config.routing.load();
                 let channel_model = routing.resolve(ProcessType::Channel, None).to_string();
                 let branch_model = routing.resolve(ProcessType::Branch, None).to_string();
-                let mode = if self.listen_only_mode {
-                    "quiet"
-                } else {
-                    "active"
+                let mode = match self.resolved_settings.response_mode {
+                    ResponseMode::Active => "active",
+                    ResponseMode::Quiet => "quiet (only command/@mention/reply)",
+                    ResponseMode::MentionOnly => "mention-only (@mention/reply only)",
                 };
                 let adapter = self.current_adapter().unwrap_or("unknown");
                 let body = format!(
@@ -904,7 +933,7 @@ impl Channel {
                      - agent: {}\n\
                      - channel: {}\n\
                      - adapter: {}\n\
-                     - mode: {} (quiet => only command/@mention/reply-to-bot)\n\
+                     - mode: {}\n\
                      - channel model: {}\n\
                      - branch model: {}\n\
                      - time: {}",
@@ -920,24 +949,30 @@ impl Channel {
                 return Ok(true);
             }
             "/quiet" => {
-                let persisted = self.set_listen_only_mode(true);
-                let body = if persisted {
-                    "quiet mode enabled. i'll only reply to commands, @mentions, or replies to my message."
-                        .to_string()
-                } else {
-                    "quiet mode enabled for this session, but persistence failed; it may revert after restart.".to_string()
-                };
-                self.send_builtin_text(body, "quiet").await;
+                self.set_response_mode(ResponseMode::Quiet).await;
+                self.send_builtin_text(
+                    "quiet mode enabled. i'll only reply to commands, @mentions, or replies to my message.".to_string(),
+                    "quiet",
+                ).await;
                 return Ok(true);
             }
             "/active" => {
-                let persisted = self.set_listen_only_mode(false);
-                let body = if persisted {
-                    "active mode enabled. i'll respond normally in this chat.".to_string()
-                } else {
-                    "active mode enabled for this session, but persistence failed; it may revert after restart.".to_string()
-                };
-                self.send_builtin_text(body, "active").await;
+                self.set_response_mode(ResponseMode::Active).await;
+                self.send_builtin_text(
+                    "active mode enabled. i'll respond normally in this chat.".to_string(),
+                    "active",
+                )
+                .await;
+                return Ok(true);
+            }
+            "/mention-only" => {
+                self.set_response_mode(ResponseMode::MentionOnly).await;
+                self.send_builtin_text(
+                    "mention-only mode enabled. i'll only respond when @mentioned or replied to."
+                        .to_string(),
+                    "mention-only",
+                )
+                .await;
                 return Ok(true);
             }
             "/help" => {
@@ -1390,15 +1425,22 @@ impl Channel {
             }
         }
 
-        if self.listen_only_mode && !batch_has_invoke && !self.is_dm() {
+        if !matches!(self.resolved_settings.response_mode, ResponseMode::Active)
+            && !batch_has_invoke
+            && !self.is_dm()
+        {
             tracing::debug!(
                 channel_id = %self.id,
                 message_count,
-                "listen-first mode: suppressing unsolicited coalesced batch"
+                response_mode = ?self.resolved_settings.response_mode,
+                "suppressing unsolicited coalesced batch"
             );
-            // Keep passive memory capture behavior aligned with single-message flow.
-            self.message_count += message_count;
-            self.check_memory_persistence().await;
+            // In Quiet mode, keep passive memory capture.
+            // In MentionOnly mode, skip memory persistence.
+            if matches!(self.resolved_settings.response_mode, ResponseMode::Quiet) {
+                self.message_count += message_count;
+                self.check_memory_persistence().await;
+            }
             return Ok(());
         }
 
@@ -1779,9 +1821,12 @@ impl Channel {
         let mut invoked_by_mention = false;
         let mut invoked_by_reply = false;
 
-        // Listen-first guardrail:
-        // ingest all messages, but only reply when explicitly invoked.
-        if self.listen_only_mode && message.source != "system" && !self.is_dm() {
+        // Response mode guardrail:
+        // In Quiet/MentionOnly modes, ingest messages but only reply when explicitly invoked.
+        if !matches!(self.resolved_settings.response_mode, ResponseMode::Active)
+            && message.source != "system"
+            && !self.is_dm()
+        {
             (invoked_by_command, invoked_by_mention, invoked_by_reply) =
                 self.compute_listen_mode_invocation(&message, &raw_text);
 
@@ -1789,13 +1834,15 @@ impl Channel {
                 tracing::debug!(
                     channel_id = %self.id,
                     source = %message.source,
-                    "listen-first mode: suppressing unsolicited reply"
+                    response_mode = ?self.resolved_settings.response_mode,
+                    "suppressing unsolicited reply"
                 );
-                // In quiet/listen-first mode we still want passive memory capture.
-                // Count suppressed user messages so auto memory persistence branches
-                // continue to run on interval without requiring explicit invokes.
-                self.message_count += 1;
-                self.check_memory_persistence().await;
+                // In Quiet mode, keep passive memory capture.
+                // In MentionOnly mode, skip memory persistence entirely.
+                if matches!(self.resolved_settings.response_mode, ResponseMode::Quiet) {
+                    self.message_count += 1;
+                    self.check_memory_persistence().await;
+                }
                 return Ok(());
             }
         }

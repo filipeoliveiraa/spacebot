@@ -109,6 +109,22 @@ impl WorkerMemoryMode {
     }
 }
 
+/// Response mode controls how the channel handles incoming messages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseMode {
+    /// Respond to all messages normally.
+    #[default]
+    Active,
+    /// Observe and learn (history + memory persistence) but only respond
+    /// to @mentions, replies-to-bot, and slash commands.
+    Quiet,
+    /// Only respond when explicitly @mentioned or replied to.
+    /// Messages that don't pass the mention check are recorded in history
+    /// but receive no processing (no memory persistence, no LLM).
+    MentionOnly,
+}
+
 /// Worker context settings control what context workers receive when spawned.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct WorkerContextMode {
@@ -167,6 +183,14 @@ pub struct ConversationSettings {
     #[serde(default)]
     pub delegation: DelegationMode,
 
+    /// How the channel handles incoming messages.
+    #[serde(default)]
+    pub response_mode: ResponseMode,
+
+    /// Whether file attachments are saved to workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_attachments: Option<bool>,
+
     /// What context workers spawned from this conversation receive.
     #[serde(default)]
     pub worker_context: WorkerContextMode,
@@ -184,6 +208,10 @@ pub struct ResolvedConversationSettings {
     pub memory: MemoryMode,
     /// The resolved delegation mode.
     pub delegation: DelegationMode,
+    /// The resolved response mode.
+    pub response_mode: ResponseMode,
+    /// Whether file attachments are saved.
+    pub save_attachments: bool,
     /// The resolved worker context settings.
     pub worker_context: WorkerContextMode,
 }
@@ -223,6 +251,10 @@ impl ResolvedConversationSettings {
             resolved.model_overrides = default.model_overrides.clone();
             resolved.memory = default.memory;
             resolved.delegation = default.delegation;
+            resolved.response_mode = default.response_mode;
+            if let Some(sa) = default.save_attachments {
+                resolved.save_attachments = sa;
+            }
             resolved.worker_context = default.worker_context.clone();
         }
 
@@ -237,6 +269,10 @@ impl ResolvedConversationSettings {
             );
             resolved.memory = channel_settings.memory;
             resolved.delegation = channel_settings.delegation;
+            resolved.response_mode = channel_settings.response_mode;
+            if let Some(sa) = channel_settings.save_attachments {
+                resolved.save_attachments = sa;
+            }
             resolved.worker_context = channel_settings.worker_context.clone();
         }
 
@@ -251,6 +287,10 @@ impl ResolvedConversationSettings {
             );
             resolved.memory = conv_settings.memory;
             resolved.delegation = conv_settings.delegation;
+            resolved.response_mode = conv_settings.response_mode;
+            if let Some(sa) = conv_settings.save_attachments {
+                resolved.save_attachments = sa;
+            }
             resolved.worker_context = conv_settings.worker_context.clone();
         }
 
@@ -281,6 +321,8 @@ impl Default for ResolvedConversationSettings {
             model_overrides: ModelOverrides::default(),
             memory: MemoryMode::Full,
             delegation: DelegationMode::Standard,
+            response_mode: ResponseMode::Active,
+            save_attachments: false,
             worker_context: WorkerContextMode::default(),
         }
     }

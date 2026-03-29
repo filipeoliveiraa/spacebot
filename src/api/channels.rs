@@ -962,6 +962,98 @@ async fn find_snapshot_store(
     Err(StatusCode::NOT_FOUND)
 }
 
+// --- Channel Settings Endpoints ---
+
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub(super) struct ChannelSettingsQuery {
+    agent_id: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct ChannelSettingsResponse {
+    conversation_id: String,
+    settings: crate::conversation::ConversationSettings,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct UpdateChannelSettingsRequest {
+    agent_id: String,
+    settings: crate::conversation::ConversationSettings,
+}
+
+#[utoipa::path(
+    get,
+    path = "/channels/{channel_id}/settings",
+    params(
+        ("channel_id" = String, Path, description = "Channel conversation ID"),
+        ChannelSettingsQuery,
+    ),
+    responses(
+        (status = 200, body = ChannelSettingsResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "channels",
+)]
+pub(super) async fn get_channel_settings(
+    State(state): State<Arc<ApiState>>,
+    axum::extract::Path(channel_id): axum::extract::Path<String>,
+    Query(query): Query<ChannelSettingsQuery>,
+) -> Result<Json<ChannelSettingsResponse>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let store = crate::conversation::ChannelSettingsStore::new(pool.clone());
+    let settings = store
+        .get(&query.agent_id, &channel_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, %channel_id, "failed to get channel settings");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .unwrap_or_default();
+
+    Ok(Json(ChannelSettingsResponse {
+        conversation_id: channel_id,
+        settings,
+    }))
+}
+
+#[utoipa::path(
+    put,
+    path = "/channels/{channel_id}/settings",
+    request_body = UpdateChannelSettingsRequest,
+    params(
+        ("channel_id" = String, Path, description = "Channel conversation ID"),
+    ),
+    responses(
+        (status = 200, body = ChannelSettingsResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "channels",
+)]
+pub(super) async fn update_channel_settings(
+    State(state): State<Arc<ApiState>>,
+    axum::extract::Path(channel_id): axum::extract::Path<String>,
+    Json(request): Json<UpdateChannelSettingsRequest>,
+) -> Result<Json<ChannelSettingsResponse>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let store = crate::conversation::ChannelSettingsStore::new(pool.clone());
+    store
+        .upsert(&request.agent_id, &channel_id, &request.settings)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, %channel_id, "failed to update channel settings");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(ChannelSettingsResponse {
+        conversation_id: channel_id,
+        settings: request.settings,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

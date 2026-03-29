@@ -2102,11 +2102,12 @@ async fn run(
         };
         tokio::select! {
             Some(mut message) = inbound_next, if agents_initialized => {
+                let mut binding_settings: Option<spacebot::conversation::ConversationSettings> = None;
                 let agent_id = if let Some(existing) = message.agent_id.as_ref() {
                     existing.clone()
                 } else {
                     let current_bindings = bindings.load();
-                    let Some(resolved) = spacebot::config::resolve_agent_for_message(
+                    let Some((resolved, matched_settings)) = spacebot::config::resolve_agent_for_message(
                         &current_bindings,
                         &message,
                         &default_agent_id,
@@ -2114,6 +2115,7 @@ async fn run(
                         // Message suppressed by require_mention — drop it.
                         continue;
                     };
+                    binding_settings = matched_settings;
                     message.agent_id = Some(resolved.clone());
                     resolved
                 };
@@ -2147,8 +2149,10 @@ async fn run(
                         .as_ref()
                         .clone();
 
-                    // Load per-conversation settings for portal conversations.
+                    // Load per-conversation settings.
+                    // Resolution: per-channel DB override > binding defaults > agent defaults > system defaults
                     let resolved_settings = if message.adapter.as_deref() == Some("portal") {
+                        // Portal: load from portal_conversations table.
                         let store = spacebot::conversation::PortalConversationStore::new(
                             agent.deps.sqlite_pool.clone(),
                         );
@@ -2156,12 +2160,16 @@ async fn run(
                             Ok(Some(conv)) => {
                                 spacebot::conversation::settings::ResolvedConversationSettings::resolve(
                                     conv.settings.as_ref(),
-                                    None,
+                                    binding_settings.as_ref(),
                                     None,
                                 )
                             }
                             Ok(None) => {
-                                spacebot::conversation::settings::ResolvedConversationSettings::default()
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    None,
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
                             }
                             Err(error) => {
                                 tracing::warn!(
@@ -2173,7 +2181,34 @@ async fn run(
                             }
                         }
                     } else {
-                        spacebot::conversation::settings::ResolvedConversationSettings::default()
+                        // Platform channels: load from channel_settings table.
+                        let store = spacebot::conversation::ChannelSettingsStore::new(
+                            agent.deps.sqlite_pool.clone(),
+                        );
+                        match store.get(&agent_id.to_string(), &conversation_id).await {
+                            Ok(Some(settings)) => {
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    Some(&settings),
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
+                            }
+                            Ok(None) => {
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    None,
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    %conversation_id,
+                                    "failed to load channel settings, using defaults"
+                                );
+                                spacebot::conversation::settings::ResolvedConversationSettings::default()
+                            }
+                        }
                     };
 
                     let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(

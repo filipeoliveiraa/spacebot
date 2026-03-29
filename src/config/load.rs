@@ -113,6 +113,28 @@ pub(super) fn warn_unknown_config_keys(content: &str) {
     }
 }
 
+/// Parse response_mode from TOML, with backwards compatibility for listen_only_mode.
+fn parse_response_mode(
+    response_mode: Option<&str>,
+    listen_only_mode: Option<bool>,
+) -> Option<crate::conversation::settings::ResponseMode> {
+    use crate::conversation::settings::ResponseMode;
+
+    if let Some(mode) = response_mode {
+        return Some(match mode {
+            "quiet" => ResponseMode::Quiet,
+            "mention_only" => ResponseMode::MentionOnly,
+            _ => ResponseMode::Active,
+        });
+    }
+    // Backwards compat: listen_only_mode = true maps to Quiet
+    if let Some(true) = listen_only_mode {
+        tracing::warn!("listen_only_mode is deprecated, use response_mode = \"quiet\" instead");
+        return Some(ResponseMode::Quiet);
+    }
+    None
+}
+
 fn parse_close_policy(value: Option<&str>) -> Option<ClosePolicy> {
     match value? {
         "close_browser" => Some(ClosePolicy::CloseBrowser),
@@ -1536,13 +1558,20 @@ impl Config {
             channel: toml
                 .defaults
                 .channel
-                .map(|channel_config| ChannelConfig {
-                    listen_only_mode: channel_config
-                        .listen_only_mode
-                        .unwrap_or(base_defaults.channel.listen_only_mode),
-                    save_attachments: channel_config
-                        .save_attachments
-                        .unwrap_or(base_defaults.channel.save_attachments),
+                .map(|channel_config| {
+                    let response_mode = parse_response_mode(
+                        channel_config.response_mode.as_deref(),
+                        channel_config.listen_only_mode,
+                    );
+                    ChannelConfig {
+                        listen_only_mode: channel_config
+                            .listen_only_mode
+                            .unwrap_or(base_defaults.channel.listen_only_mode),
+                        response_mode,
+                        save_attachments: channel_config
+                            .save_attachments
+                            .unwrap_or(base_defaults.channel.save_attachments),
+                    }
                 })
                 .unwrap_or(base_defaults.channel),
             mcp: default_mcp,
@@ -1741,13 +1770,21 @@ impl Config {
                         ),
                         chrome_cache_dir: defaults.browser.chrome_cache_dir.clone(),
                     }),
-                    channel: a.channel.map(|channel_config| ChannelConfig {
-                        listen_only_mode: channel_config
-                            .listen_only_mode
-                            .unwrap_or(defaults.channel.listen_only_mode),
-                        save_attachments: channel_config
-                            .save_attachments
-                            .unwrap_or(defaults.channel.save_attachments),
+                    channel: a.channel.map(|channel_config| {
+                        let response_mode = parse_response_mode(
+                            channel_config.response_mode.as_deref(),
+                            channel_config.listen_only_mode,
+                        )
+                        .or(defaults.channel.response_mode);
+                        ChannelConfig {
+                            listen_only_mode: channel_config
+                                .listen_only_mode
+                                .unwrap_or(defaults.channel.listen_only_mode),
+                            response_mode,
+                            save_attachments: channel_config
+                                .save_attachments
+                                .unwrap_or(defaults.channel.save_attachments),
+                        }
                     }),
                     mcp: match a.mcp {
                         Some(mcp_servers) => Some(
@@ -2294,17 +2331,42 @@ impl Config {
         let bindings: Vec<Binding> = toml
             .bindings
             .into_iter()
-            .map(|b| Binding {
-                agent_id: b.agent_id,
-                channel: b.channel,
-                adapter: normalize_adapter(b.adapter),
-                guild_id: b.guild_id,
-                workspace_id: b.workspace_id,
-                chat_id: b.chat_id,
-                team_id: b.team_id,
-                channel_ids: b.channel_ids,
-                require_mention: b.require_mention,
-                dm_allowed_users: b.dm_allowed_users,
+            .map(|b| {
+                let settings = b.settings.map(|s| {
+                    use crate::conversation::settings::*;
+                    ConversationSettings {
+                        model: s.model,
+                        memory: match s.memory.as_deref() {
+                            Some("ambient") => MemoryMode::Ambient,
+                            Some("off") => MemoryMode::Off,
+                            _ => MemoryMode::Full,
+                        },
+                        delegation: match s.delegation.as_deref() {
+                            Some("direct") => DelegationMode::Direct,
+                            _ => DelegationMode::Standard,
+                        },
+                        response_mode: match s.response_mode.as_deref() {
+                            Some("quiet") => ResponseMode::Quiet,
+                            Some("mention_only") => ResponseMode::MentionOnly,
+                            _ => ResponseMode::Active,
+                        },
+                        save_attachments: s.save_attachments,
+                        ..Default::default()
+                    }
+                });
+                Binding {
+                    agent_id: b.agent_id,
+                    channel: b.channel,
+                    adapter: normalize_adapter(b.adapter),
+                    guild_id: b.guild_id,
+                    workspace_id: b.workspace_id,
+                    chat_id: b.chat_id,
+                    team_id: b.team_id,
+                    channel_ids: b.channel_ids,
+                    require_mention: b.require_mention,
+                    dm_allowed_users: b.dm_allowed_users,
+                    settings,
+                }
             })
             .collect();
 

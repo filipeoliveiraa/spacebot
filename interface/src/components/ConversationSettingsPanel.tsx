@@ -93,6 +93,20 @@ const DELEGATION_DESCRIPTIONS: Record<string, string> = {
 		"Agent has direct access to shell, files, browser, and memory tools. Power-user mode.",
 };
 
+const RESPONSE_MODE_OPTIONS = [
+	{ value: "active", label: "Active" },
+	{ value: "quiet", label: "Quiet" },
+	{ value: "mention_only", label: "Mention Only" },
+] as const;
+
+const RESPONSE_MODE_DESCRIPTIONS: Record<string, string> = {
+	active: "Responds to all messages normally.",
+	quiet:
+		"Observes and learns from the conversation, but only responds when @mentioned, replied to, or given a command.",
+	mention_only:
+		"Only responds when explicitly @mentioned or replied to. No passive memory capture.",
+};
+
 const WORKER_HISTORY_OPTIONS = [
 	{ value: "none", label: "None" },
 	{ value: "summary", label: "Summary" },
@@ -170,6 +184,7 @@ export function ConversationSettingsPanel({
 
 	const currentMemory = currentSettings.memory || defaults.memory;
 	const currentDelegation = currentSettings.delegation || defaults.delegation;
+	const currentResponseMode = currentSettings.response_mode || "active";
 
 	return (
 		<div className="flex flex-col gap-3">
@@ -271,6 +286,37 @@ export function ConversationSettingsPanel({
 						</SelectTrigger>
 						<SelectContent>
 							{DELEGATION_OPTIONS.map((opt) => (
+								<SelectItem
+									key={opt.value}
+									value={opt.value}
+									className="text-xs"
+								>
+									{opt.label}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				</SettingField>
+
+				<SettingField
+					label="Response"
+					description={RESPONSE_MODE_DESCRIPTIONS[currentResponseMode]}
+				>
+					<Select
+						value={currentResponseMode}
+						onValueChange={(value) =>
+							onChange({
+								...currentSettings,
+								response_mode:
+									value as ConversationSettings["response_mode"],
+							})
+						}
+					>
+						<SelectTrigger className="h-7 text-xs">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{RESPONSE_MODE_OPTIONS.map((opt) => (
 								<SelectItem
 									key={opt.value}
 									value={opt.value}
