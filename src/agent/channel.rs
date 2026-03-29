@@ -457,11 +457,6 @@ pub struct Channel {
     /// Injected into the system prompt (not into chat history) so the LLM
     /// treats it as read-only context rather than actionable user messages.
     backfill_transcript: Option<String>,
-    /// Channel-local reply mode toggle.
-    /// When true, suppress unsolicited replies unless explicitly invoked.
-    listen_only_mode: bool,
-    /// Session-scoped override used when persistence is unavailable/failed.
-    listen_only_session_override: Option<bool>,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
     /// Per-conversation resolved settings (memory mode, delegation mode, model override).
@@ -581,10 +576,6 @@ impl Channel {
         };
 
         let self_tx = message_tx.clone();
-        // Derive listen_only_mode from response_mode. In Phase 4 cleanup,
-        // all listen_only_mode references will be replaced by response_mode checks.
-        let resolved_listen_only_mode =
-            !matches!(resolved_settings.response_mode, ResponseMode::Active);
         let control_handle = ChannelControlHandle::new(state.clone());
         let channel = Self {
             id: id.clone(),
@@ -615,8 +606,6 @@ impl Channel {
             pending_results: Vec::new(),
             send_agent_message_tool,
             backfill_transcript: None,
-            listen_only_mode: resolved_listen_only_mode,
-            listen_only_session_override: None,
             control_handle,
             resolved_settings,
         };
@@ -649,85 +638,14 @@ impl Channel {
             .filter(|adapter| !adapter.is_empty())
     }
 
-    fn sync_listen_only_mode_from_runtime(&mut self) {
-        if let Some(override_mode) = self.listen_only_session_override {
-            self.listen_only_mode = override_mode;
-            return;
-        }
-        let runtime_default = self
-            .deps
-            .runtime_config
-            .channel_config
-            .load()
-            .listen_only_mode;
-        let explicit_listen_only = **self.deps.runtime_config.channel_listen_only_explicit.load();
-        let settings_store = self
-            .deps
-            .runtime_config
-            .settings
-            .load()
-            .as_ref()
-            .as_ref()
-            .cloned();
-        self.listen_only_mode = if explicit_listen_only.is_some() {
-            runtime_default
-        } else if let Some(settings_store) = settings_store {
-            match settings_store.channel_listen_only_mode_for(self.id.as_ref()) {
-                Ok(Some(enabled)) => enabled,
-                Ok(None) => runtime_default,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.id,
-                        "failed to sync channel-scoped listen_only_mode setting"
-                    );
-                    runtime_default
-                }
-            }
-        } else {
-            runtime_default
-        };
-    }
-
-    fn set_listen_only_mode(&mut self, enabled: bool) -> bool {
-        let mut persisted = false;
-        let settings_store = self
-            .deps
-            .runtime_config
-            .settings
-            .load()
-            .as_ref()
-            .as_ref()
-            .cloned();
-        if let Some(settings_store) = settings_store {
-            match settings_store.set_channel_listen_only_mode_for(self.id.as_ref(), enabled) {
-                Ok(()) => persisted = true,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.id,
-                        listen_only_mode = enabled,
-                        "failed to persist listen_only_mode setting"
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(
-                channel_id = %self.id,
-                listen_only_mode = enabled,
-                "settings store unavailable; listen_only_mode is session-scoped"
-            );
-        }
-
-        self.listen_only_mode = enabled;
-        self.listen_only_session_override = if persisted { None } else { Some(enabled) };
-        persisted
+    /// Whether the channel is in a non-active response mode (Quiet or MentionOnly).
+    fn is_suppressed(&self) -> bool {
+        !matches!(self.resolved_settings.response_mode, ResponseMode::Active)
     }
 
     /// Update the response mode and persist to the channel_settings table.
     async fn set_response_mode(&mut self, mode: ResponseMode) {
         self.resolved_settings.response_mode = mode;
-        self.listen_only_mode = !matches!(mode, ResponseMode::Active);
 
         // Persist to channel_settings table
         let store = crate::conversation::ChannelSettingsStore::new(self.deps.sqlite_pool.clone());
@@ -1221,7 +1139,6 @@ impl Channel {
     #[tracing::instrument(skip(self, messages), fields(channel_id = %self.id, agent_id = %self.deps.agent_id, message_count = messages.len()))]
     async fn handle_message_batch(&mut self, messages: Vec<InboundMessage>) -> Result<()> {
         // Apply runtime-config updates immediately without requiring a restart.
-        self.sync_listen_only_mode_from_runtime();
 
         let message_count = messages.len();
         let batch_start_timestamp = messages
@@ -1350,7 +1267,7 @@ impl Channel {
                     }
                 };
 
-                if self.listen_only_mode {
+                if self.is_suppressed() {
                     let (invoked_by_command, invoked_by_mention, invoked_by_reply) =
                         self.compute_listen_mode_invocation(message, &raw_text);
                     batch_has_invoke |=
@@ -1664,7 +1581,6 @@ impl Channel {
     #[tracing::instrument(skip(self, message), fields(channel_id = %self.id, agent_id = %self.deps.agent_id, message_id = %message.id))]
     async fn handle_message(&mut self, message: InboundMessage) -> Result<()> {
         // Apply runtime-config updates immediately without requiring a restart.
-        self.sync_listen_only_mode_from_runtime();
 
         // Track the inbound message that triggered this turn so outbound
         // responses carry the correct routing metadata (e.g. Slack thread_ts).
@@ -1774,7 +1690,7 @@ impl Channel {
 
         // Deterministic ping ack for Discord quiet-mode mentions/replies to avoid
         // flaky model behavior (e.g. skipping or over-formatting simple liveness checks).
-        if should_send_discord_quiet_mode_ping_ack(&message, &raw_text, self.listen_only_mode) {
+        if should_send_discord_quiet_mode_ping_ack(&message, &raw_text, self.is_suppressed()) {
             self.send_builtin_text("yeah i'm here".to_string(), "discord-ping")
                 .await;
             return Ok(());
@@ -1911,7 +1827,7 @@ impl Channel {
         if should_send_quiet_mode_fallback(
             &message,
             QuietModeFallbackState {
-                listen_only_mode: self.listen_only_mode,
+                is_suppressed: self.is_suppressed(),
                 is_retrigger,
                 invoked_by_command,
                 invoked_by_mention,
@@ -2868,7 +2784,6 @@ impl Channel {
     /// Handle a process event (branch results, worker completions, status updates).
     async fn handle_event(&mut self, event: ProcessEvent) -> Result<()> {
         // Keep mode aligned with live settings updates while this worker runs.
-        self.sync_listen_only_mode_from_runtime();
 
         // Only process events targeted at this channel
         if !event_is_for_channel(&event, &self.id) {
@@ -3567,9 +3482,9 @@ fn looks_like_liveness_ping(text: &str) -> bool {
 fn should_send_discord_quiet_mode_ping_ack(
     message: &InboundMessage,
     raw_text: &str,
-    listen_only_mode: bool,
+    is_suppressed: bool,
 ) -> bool {
-    if message.source != "discord" || !listen_only_mode {
+    if message.source != "discord" || !is_suppressed {
         return false;
     }
 
@@ -3580,7 +3495,7 @@ fn should_send_discord_quiet_mode_ping_ack(
 
 #[derive(Debug, Clone, Copy)]
 struct QuietModeFallbackState {
-    listen_only_mode: bool,
+    is_suppressed: bool,
     is_retrigger: bool,
     invoked_by_command: bool,
     invoked_by_mention: bool,
@@ -3593,7 +3508,7 @@ fn should_send_quiet_mode_fallback(
     message: &InboundMessage,
     state: QuietModeFallbackState,
 ) -> bool {
-    state.listen_only_mode
+    state.is_suppressed
         && !state.is_retrigger
         && !state.invoked_by_command
         && (state.invoked_by_mention || state.invoked_by_reply)
@@ -3850,7 +3765,7 @@ mod tests {
         assert!(should_send_quiet_mode_fallback(
             &message,
             QuietModeFallbackState {
-                listen_only_mode: true,
+                is_suppressed: true,
                 is_retrigger: false,
                 invoked_by_command: false,
                 invoked_by_mention: true,
@@ -3862,7 +3777,7 @@ mod tests {
         assert!(!should_send_quiet_mode_fallback(
             &message,
             QuietModeFallbackState {
-                listen_only_mode: true,
+                is_suppressed: true,
                 is_retrigger: false,
                 invoked_by_command: false,
                 invoked_by_mention: true,
@@ -3874,7 +3789,7 @@ mod tests {
         assert!(!should_send_quiet_mode_fallback(
             &message,
             QuietModeFallbackState {
-                listen_only_mode: true,
+                is_suppressed: true,
                 is_retrigger: false,
                 invoked_by_command: false,
                 invoked_by_mention: true,
@@ -3886,7 +3801,7 @@ mod tests {
         assert!(!should_send_quiet_mode_fallback(
             &message,
             QuietModeFallbackState {
-                listen_only_mode: true,
+                is_suppressed: true,
                 is_retrigger: true,
                 invoked_by_command: false,
                 invoked_by_mention: true,

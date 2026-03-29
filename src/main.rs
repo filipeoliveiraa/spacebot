@@ -2777,13 +2777,7 @@ async fn initialize_agents(
             skills,
         ));
 
-        // Set the settings store in RuntimeConfig and apply config-driven defaults
-        let explicit_listen_only = config
-            .agents
-            .iter()
-            .find(|agent| agent.id == agent_config.id)
-            .and_then(|agent| agent.channel.map(|channel| channel.listen_only_mode));
-        runtime_config.set_settings(settings_store.clone(), explicit_listen_only);
+        runtime_config.set_settings(settings_store.clone());
         runtime_config
             .prompt_snapshots
             .store(Arc::new(prompt_snapshot_store.clone()));
