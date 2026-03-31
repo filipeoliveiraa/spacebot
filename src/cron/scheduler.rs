@@ -102,8 +102,13 @@ impl Drop for ExecutionGuard {
 
 /// Emit a cron execution error to both working memory and tracing.
 /// Centralizes error reporting to ensure consistent handling across all error paths.
-fn emit_cron_error(context: &CronContext, job_id: &str, error: &crate::error::Error) {
-    let message = format!("Cron failed: {job_id}: {error}");
+fn emit_cron_error(
+    context: &CronContext,
+    job_id: &str,
+    failure_class: &'static str,
+    error: &crate::error::Error,
+) {
+    let message = format!("Cron {failure_class}: {job_id}: {error}");
 
     // Emit to working memory for agent context awareness
     context
@@ -114,7 +119,7 @@ fn emit_cron_error(context: &CronContext, job_id: &str, error: &crate::error::Er
         .record();
 
     // Log to tracing for observability
-    tracing::error!(cron_id = %job_id, %error, "cron job execution failed");
+    tracing::error!(cron_id = %job_id, failure_class, %error, "cron job execution failed");
 }
 
 #[derive(Debug)]
@@ -563,7 +568,12 @@ impl Scheduler {
                             }
                         }
                         Err(error) => {
-                            emit_cron_error(&exec_context, &exec_job_id, error.as_error());
+                            emit_cron_error(
+                                &exec_context,
+                                &exec_job_id,
+                                error.failure_class(),
+                                error.as_error(),
+                            );
 
                             let should_disable = {
                                 let mut j = exec_jobs.write().await;
@@ -1252,7 +1262,10 @@ fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {
 
 /// Execute a single cron job: create a fresh channel, run the prompt, deliver the result.
 #[tracing::instrument(skip(context), fields(cron_id = %job.id, agent_id = %context.deps.agent_id))]
-async fn run_cron_job(job: &CronJob, context: &CronContext) -> std::result::Result<(), CronRunError> {
+async fn run_cron_job(
+    job: &CronJob,
+    context: &CronContext,
+) -> std::result::Result<(), CronRunError> {
     ensure_cron_dispatch_readiness(context, &job.id);
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
@@ -1314,7 +1327,9 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> std::result::Resu
                 delivery_error: None,
             },
         );
-        return Err(CronRunError::Execution(anyhow::anyhow!(error_message).into()));
+        return Err(CronRunError::Execution(
+            anyhow::anyhow!(error_message).into(),
+        ));
     }
 
     let timeout = Duration::from_secs(job.timeout_secs.unwrap_or(120));
@@ -1359,7 +1374,9 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> std::result::Resu
                         delivery_error: None,
                     },
                 );
-                return Err(CronRunError::Execution(anyhow::anyhow!(error_message).into()));
+                return Err(CronRunError::Execution(
+                    anyhow::anyhow!(error_message).into(),
+                ));
             }
             Err(join_error) => {
                 let error_message = format!("cron channel join failed: {join_error}");
@@ -1375,7 +1392,9 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> std::result::Resu
                         delivery_error: None,
                     },
                 );
-                return Err(CronRunError::Execution(anyhow::anyhow!(error_message).into()));
+                return Err(CronRunError::Execution(
+                    anyhow::anyhow!(error_message).into(),
+                ));
             }
         },
         CronResponseWaitOutcome::TimedOut => {
@@ -1416,7 +1435,9 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> std::result::Resu
                 },
             );
 
-            return Err(CronRunError::Execution(anyhow::anyhow!(error_message).into()));
+            return Err(CronRunError::Execution(
+                anyhow::anyhow!(error_message).into(),
+            ));
         }
     };
 
@@ -1669,8 +1690,8 @@ fn cron_response_summary(response: &OutboundResponse) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CronConfig, CronJob, CronResponseWaitOutcome, await_cron_delivery_response,
-        CronRunError, cron_response_summary, hour_in_active_window, normalize_active_hours,
+        CronConfig, CronJob, CronResponseWaitOutcome, CronRunError, await_cron_delivery_response,
+        cron_response_summary, hour_in_active_window, normalize_active_hours,
         normalize_cron_delivery_response, set_job_enabled_state, sync_job_from_store,
     };
     use crate::cron::store::CronStore;
