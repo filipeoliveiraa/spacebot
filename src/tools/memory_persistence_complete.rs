@@ -109,7 +109,7 @@ pub struct MemoryPersistenceCompleteArgs {
 /// A single event extracted by the persistence branch for the working memory log.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct WorkingMemoryEventInput {
-    /// Event type: "decision", "error", or "system".
+    /// Event type: "decision", "user_correction", "decision_revised", "error", or "system".
     pub event_type: String,
     /// One-line summary of the event.
     pub summary: String,
@@ -165,8 +165,14 @@ impl Tool for MemoryPersistenceCompleteTool {
                             "type": "object",
                             "properties": {
                                 "event_type": {
-                                    "type": "string",
-                                    "enum": ["decision", "error", "system"],
+                                "type": "string",
+                                    "enum": [
+                                        "decision",
+                                        "user_correction",
+                                        "decision_revised",
+                                        "error",
+                                        "system"
+                                    ],
                                     "description": "Type of event"
                                 },
                                 "summary": {
@@ -194,11 +200,9 @@ impl Tool for MemoryPersistenceCompleteTool {
         // Write any extracted events to working memory (fire-and-forget).
         if let Some(working_memory) = &self.working_memory {
             for event_input in &args.events {
-                let event_type = match event_input.event_type.as_str() {
-                    "decision" => crate::memory::WorkingMemoryEventType::Decision,
-                    "error" => crate::memory::WorkingMemoryEventType::Error,
-                    _ => crate::memory::WorkingMemoryEventType::System,
-                };
+                let event_type =
+                    crate::memory::WorkingMemoryEventType::parse(&event_input.event_type)
+                        .unwrap_or(crate::memory::WorkingMemoryEventType::System);
                 let importance = event_input.importance.clamp(0.0, 1.0);
                 let mut builder = working_memory
                     .emit(event_type, &event_input.summary)
@@ -348,5 +352,66 @@ mod tests {
 
         assert!(output.success);
         assert_eq!(output.outcome, "no_memories");
+    }
+
+    #[tokio::test]
+    async fn persists_conversational_events() {
+        let state = Arc::new(MemoryPersistenceContractState::default());
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite connect");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+
+        let working_memory = crate::memory::WorkingMemoryStore::new(pool, chrono_tz::Tz::UTC);
+        let tool = MemoryPersistenceCompleteTool::new(state)
+            .with_working_memory(working_memory.clone(), Some("test-channel".to_string()));
+
+        tool.call(MemoryPersistenceCompleteArgs {
+            outcome: "no_memories".to_string(),
+            saved_memory_ids: Vec::new(),
+            reason: Some("Nothing worth retaining".to_string()),
+            events: vec![
+                WorkingMemoryEventInput {
+                    event_type: "user_correction".to_string(),
+                    summary: "User corrected a payment split assumption".to_string(),
+                    importance: 0.8,
+                },
+                WorkingMemoryEventInput {
+                    event_type: "decision_revised".to_string(),
+                    summary: "Decision changed after user feedback".to_string(),
+                    importance: 0.8,
+                },
+            ],
+        })
+        .await
+        .expect("persistence complete should pass");
+
+        let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let events = working_memory
+                    .get_events_for_channel("test-channel", 10)
+                    .await
+                    .expect("working memory query");
+                if events.len() == 2 {
+                    break events;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for working memory events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].event_type,
+            crate::memory::WorkingMemoryEventType::UserCorrection
+        );
+        assert_eq!(
+            events[1].event_type,
+            crate::memory::WorkingMemoryEventType::DecisionRevised
+        );
     }
 }
