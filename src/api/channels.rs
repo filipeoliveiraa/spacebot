@@ -612,7 +612,14 @@ pub(super) async fn inspect_prompt(
         &participant_config,
     )
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|error| {
+        tracing::warn!(
+            %error,
+            channel_id = %query.channel_id,
+            "failed to render participant context for prompt inspection"
+        );
+        String::new()
+    });
 
     // ── Available channels ──
     let available_channels = {

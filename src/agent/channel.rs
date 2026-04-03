@@ -86,6 +86,25 @@ fn should_flush_coalesce_buffer_for_event(event: &ProcessEvent) -> bool {
     )
 }
 
+fn sentence_contains_decision_marker(sentence: &str, explicit_markers: &[&str]) -> bool {
+    let sentence_lower = sentence.to_ascii_lowercase();
+    explicit_markers
+        .iter()
+        .any(|marker| sentence_lower.contains(marker))
+        || (sentence_lower.contains(" instead of ")
+            && [
+                "use ",
+                "switch",
+                "adopt ",
+                "choose ",
+                "pick ",
+                "go with ",
+                "proceed with ",
+            ]
+            .iter()
+            .any(|marker| sentence_lower.contains(marker)))
+}
+
 fn extract_decision_summary_from_reply(reply_text: &str) -> Option<String> {
     let normalized = reply_text.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = normalized.trim();
@@ -136,9 +155,17 @@ fn extract_decision_summary_from_reply(reply_text: &str) -> Option<String> {
         return None;
     }
 
-    let mut summary = trimmed
+    let sentences: Vec<&str> = trimmed
         .split_terminator(['.', '!', '?', '\n'])
-        .find(|sentence| !sentence.trim().is_empty())
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty())
+        .collect();
+
+    let mut summary = sentences
+        .iter()
+        .copied()
+        .find(|sentence| sentence_contains_decision_marker(sentence, &explicit_markers))
+        .or_else(|| sentences.first().copied())
         .unwrap_or(trimmed)
         .trim()
         .to_string();
@@ -150,6 +177,23 @@ fn extract_decision_summary_from_reply(reply_text: &str) -> Option<String> {
     }
 
     Some(summary)
+}
+
+fn decision_user_id(
+    humans: &[crate::config::HumanDef],
+    message: &InboundMessage,
+    is_retrigger: bool,
+) -> Option<String> {
+    if is_retrigger || message.source == "system" {
+        return None;
+    }
+
+    let source = message.source.trim();
+    if source.is_empty() || message.sender_id.is_empty() {
+        return None;
+    }
+
+    Some(participant_memory_key(humans, source, &message.sender_id))
 }
 
 /// Shared state that channel tools need to act on the channel.
@@ -556,6 +600,27 @@ impl Drop for MessageDurationGuard {
 }
 
 impl Channel {
+    fn record_decision_event(&self, reply_text: Option<&str>, user_id: Option<String>) {
+        let Some(decision_summary) = reply_text.and_then(extract_decision_summary_from_reply)
+        else {
+            return;
+        };
+
+        let mut event = self
+            .deps
+            .working_memory
+            .emit(
+                crate::memory::WorkingMemoryEventType::Decision,
+                decision_summary,
+            )
+            .channel(self.id.as_ref())
+            .importance(0.8);
+        if let Some(user_id) = user_id {
+            event = event.user(user_id);
+        }
+        event.record();
+    }
+
     /// Create a new channel.
     ///
     /// All tunable config (prompts, routing, thresholds, browser, skills) is read
@@ -1603,7 +1668,7 @@ impl Channel {
         }
 
         // Run agent turn with any image/audio attachments preserved
-        let (result, skip_flag, replied_flag, _, _) = self
+        let (result, skip_flag, replied_flag, _, reply_text) = self
             .run_agent_turn(
                 &combined_text,
                 &system_prompt,
@@ -1616,6 +1681,9 @@ impl Channel {
 
         self.handle_agent_result(result, &skip_flag, &replied_flag, false)
             .await;
+        if replied_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            self.record_decision_event(reply_text.as_deref(), None);
+        }
         // Check compaction
         if let Err(error) = self.compactor.check_and_compact().await {
             tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
@@ -1989,34 +2057,10 @@ impl Channel {
         self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
 
-        if replied_flag.load(std::sync::atomic::Ordering::Relaxed)
-            && let Some(decision_summary) = reply_text
-                .as_deref()
-                .and_then(extract_decision_summary_from_reply)
-        {
-            let user_id = if message.source.trim().is_empty() || message.sender_id.is_empty() {
-                None
-            } else {
-                let humans = self.deps.humans.load();
-                Some(participant_memory_key(
-                    humans.as_ref(),
-                    message.source.trim(),
-                    &message.sender_id,
-                ))
-            };
-            let mut event = self
-                .deps
-                .working_memory
-                .emit(
-                    crate::memory::WorkingMemoryEventType::Decision,
-                    decision_summary,
-                )
-                .channel(self.id.as_ref())
-                .importance(0.8);
-            if let Some(user_id) = user_id {
-                event = event.user(user_id);
-            }
-            event.record();
+        if replied_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let humans = self.deps.humans.load();
+            let user_id = decision_user_id(humans.as_ref(), &message, is_retrigger);
+            self.record_decision_event(reply_text.as_deref(), user_id);
         }
 
         // Safety-net: in mention-only mode, explicit mention/reply should never be dropped silently.
@@ -3774,9 +3818,7 @@ fn is_dm_conversation_id(conv_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObserveModeFallbackState, compute_listen_mode_invocation, is_dm_conversation_id,
-        recv_channel_event, should_process_event_for_channel,
-        should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
+        ObserveModeFallbackState, compute_listen_mode_invocation, decision_user_id,
         extract_decision_summary_from_reply, is_dm_conversation_id, recv_channel_event,
         should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
         should_send_quiet_mode_fallback,
@@ -3888,6 +3930,40 @@ mod tests {
             )
             .is_none()
         );
+        assert_eq!(
+            extract_decision_summary_from_reply("Got it. We'll switch to the new routing config.")
+                .as_deref(),
+            Some("We'll switch to the new routing config")
+        );
+    }
+
+    #[test]
+    fn decision_user_id_skips_retrigger_messages() {
+        let humans = vec![crate::config::HumanDef {
+            id: "victor".to_string(),
+            display_name: Some("Victor".to_string()),
+            role: None,
+            bio: None,
+            description: None,
+            discord_id: Some("12345".to_string()),
+            telegram_id: None,
+            slack_id: None,
+            email: None,
+        }];
+        let message = InboundMessage {
+            id: "message-1".to_string(),
+            source: "system".to_string(),
+            adapter: None,
+            conversation_id: "discord:chan-1".to_string(),
+            sender_id: "12345".to_string(),
+            agent_id: None,
+            content: crate::MessageContent::Text("retrigger".to_string()),
+            timestamp: chrono::Utc::now(),
+            metadata: HashMap::new(),
+            formatted_author: None,
+        };
+
+        assert!(decision_user_id(&humans, &message, true).is_none());
     }
 
     #[test]

@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc};
 
 use std::collections::HashMap;
 
+const MAX_DISPLAY_NAME_CHARS: usize = 80;
+
 /// Active participant state tracked for a live channel session.
 ///
 /// This is the bridge between today's lightweight config-backed participant
@@ -59,9 +61,7 @@ pub fn track_active_participant(
     let human = find_human_for_sender(humans, platform, &message.sender_id);
     let display_name = human
         .and_then(|entry| entry.display_name.as_deref())
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
+        .and_then(sanitize_display_name)
         .unwrap_or_else(|| participant_display_name(message));
     let participant_key = participant_memory_key(humans, platform, &message.sender_id);
     let fallback_key = format!("{platform}:{}", message.sender_id);
@@ -112,21 +112,43 @@ pub fn renderable_participants(
 /// Best-effort display name for an inbound message sender.
 pub fn participant_display_name(message: &InboundMessage) -> String {
     message
-        .metadata
-        .get("sender_display_name")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(ToOwned::to_owned)
+        .formatted_author
+        .as_deref()
+        .and_then(sanitize_display_name)
         .or_else(|| {
             message
-                .formatted_author
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(ToOwned::to_owned)
+                .metadata
+                .get("sender_display_name")
+                .and_then(|value| value.as_str())
+                .and_then(sanitize_display_name)
         })
+        .or_else(|| sanitize_display_name(&message.sender_id))
         .unwrap_or_else(|| message.sender_id.clone())
+}
+
+fn sanitize_display_name(value: &str) -> Option<String> {
+    let collapsed = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let mut sanitized = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if sanitized.is_empty() {
+        return None;
+    }
+
+    if sanitized.len() > MAX_DISPLAY_NAME_CHARS {
+        let boundary = sanitized.floor_char_boundary(MAX_DISPLAY_NAME_CHARS);
+        sanitized.truncate(boundary);
+        sanitized.push_str("...");
+    }
+
+    Some(sanitized)
 }
 
 fn find_human_for_sender<'a>(
@@ -257,6 +279,27 @@ mod tests {
             participant_memory_key(&[], "discord", "12345"),
             "discord:12345"
         );
+    }
+
+    #[test]
+    fn participant_display_name_prefers_formatted_author() {
+        let mut message = test_message();
+        message.formatted_author = Some("Victor Summit".to_string());
+
+        assert_eq!(participant_display_name(&message), "Victor Summit");
+    }
+
+    #[test]
+    fn participant_display_name_sanitizes_user_input() {
+        let mut message = test_message();
+        message.formatted_author = Some("  Victor\n\t<System>\u{0007} ".repeat(10));
+
+        let display_name = participant_display_name(&message);
+        assert!(display_name.starts_with("Victor <System>"));
+        assert!(display_name.ends_with("..."));
+        assert!(display_name.len() <= MAX_DISPLAY_NAME_CHARS + 3);
+        assert!(!display_name.contains('\n'));
+        assert!(!display_name.contains('\u{0007}'));
     }
 
     #[test]
