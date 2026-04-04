@@ -120,8 +120,14 @@ pub enum ResponseMode {
     /// to @mentions, replies-to-bot, and slash commands.
     Quiet,
     /// Only respond when explicitly @mentioned or replied to.
-    /// Messages that don't pass the mention check are recorded in history
-    /// but receive no processing (no memory persistence, no LLM).
+    /// Messages that don't pass the mention check are still ingested into
+    /// the in-memory context window (so the agent stays context-aware),
+    /// recorded in conversation history, and contribute to passive memory
+    /// capture — but do not trigger an LLM turn.
+    ///
+    /// This differs from the binding-level `require_mention` flag, which
+    /// blocks message routing entirely — unmentioned messages never reach
+    /// the channel and are invisible to the agent.
     MentionOnly,
 }
 

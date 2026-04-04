@@ -569,14 +569,17 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 								)}
 
 								{platform === "discord" && (
-									<div className="flex items-center gap-2">
-										<input
-											type="checkbox"
-											checked={bindingForm.require_mention}
-											onChange={(e) => setBindingForm({...bindingForm, require_mention: e.target.checked})}
-											className="h-4 w-4 rounded border-app-line bg-app-box"
-										/>
-										<label className="text-sm text-ink-dull">Require @mention or reply to bot</label>
+									<div>
+										<div className="flex items-center gap-2">
+											<input
+												type="checkbox"
+												checked={bindingForm.require_mention}
+												onChange={(e) => setBindingForm({...bindingForm, require_mention: e.target.checked})}
+												className="h-4 w-4 rounded border-app-line bg-app-box"
+											/>
+											<label className="text-sm text-ink-dull">Require @mention or reply to bot</label>
+										</div>
+										<p className="mt-1.5 text-xs text-ink-faint">Blocks messages entirely — the agent won't see them at all. To let the agent read all messages but only respond to mentions, use Mention Only mode in Channels settings (cog icon).</p>
 									</div>
 								)}
 
