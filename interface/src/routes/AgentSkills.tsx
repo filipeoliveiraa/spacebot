@@ -9,7 +9,6 @@ import {
 	CreateSkill,
 	type SkillView,
 	type SelectedSkill,
-	type BundledSkill,
 } from "@/components/skills";
 import type {SkillInfo, RegistrySkill} from "@/api/client";
 
@@ -55,7 +54,6 @@ export function AgentSkills({agentId}: AgentSkillsProps) {
 		mutationFn: (name: string) => api.removeSkill({agent_id: agentId, name}),
 		onSuccess: (_, removedName) => {
 			queryClient.invalidateQueries({queryKey: ["skills", agentId]});
-			// Clear inspector if the removed skill was selected
 			setSelectedSkill((prev) =>
 				prev?.type === "installed" && prev.skill.name === removedName ? null : prev,
 			);
@@ -78,10 +76,6 @@ export function AgentSkills({agentId}: AgentSkillsProps) {
 
 	const handleSelectRegistrySkill = useCallback((skill: RegistrySkill) => {
 		setSelectedSkill({type: "registry", skill});
-	}, []);
-
-	const handleSelectBundledSkill = useCallback((skill: BundledSkill) => {
-		setSelectedSkill({type: "bundled", skill});
 	}, []);
 
 	return (
@@ -128,8 +122,9 @@ export function AgentSkills({agentId}: AgentSkillsProps) {
 				)}
 				{activeView === "bundled" && (
 					<BundledSkills
+						installedSkills={installedSkills}
 						selectedSkill={selectedSkill}
-						onSelectSkill={handleSelectBundledSkill}
+						onSelectSkill={handleSelectInstalledSkill}
 					/>
 				)}
 				{activeView === "create" && <CreateSkill />}

@@ -60,6 +60,12 @@ export interface ChannelLiveState {
 
 const PAGE_SIZE = 50;
 
+/** Conversation/routing tools that should never appear in the channel tool call UI. */
+const HIDDEN_CHANNEL_TOOLS = new Set([
+	"reply", "react", "skip", "set_outcome",
+	"spawn_worker", "branch", "route", "cancel",
+]);
+
 function emptyLiveState(): ChannelLiveState {
 	return {
 		isTyping: false,
@@ -79,6 +85,7 @@ function itemTimestamp(item: TimelineItem): string {
 		case "message": return item.created_at;
 		case "branch_run": return item.started_at;
 		case "worker_run": return item.started_at;
+		case "tool_call_run": return item.started_at;
 	}
 }
 
@@ -193,6 +200,9 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 			console.warn("Failed to fetch channel status:", error);
 		});
 	}, []);
+
+	// Track pending channel tool call IDs per channel+tool_name (FIFO queue).
+	const pendingChannelToolCallsRef = useRef<Record<string, string[]>>({});
 
 	// Initial status snapshot load
 	const initialSyncDone = useRef(false);
@@ -600,6 +610,28 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		const event = data as ToolStartedEvent;
 		const channelId = event.channel_id;
 
+		if (channelId && event.process_type === "channel") {
+			// Skip conversation/routing tools — they're infrastructure, not user-visible.
+			if (HIDDEN_CHANNEL_TOOLS.has(event.tool_name)) return;
+
+			const toolCallId = `tool-${generateId()}`;
+			const queueKey = `${channelId}:${event.tool_name}`;
+			const queue = pendingChannelToolCallsRef.current[queueKey] ?? [];
+			pendingChannelToolCallsRef.current[queueKey] = [...queue, toolCallId];
+
+			pushItem(channelId, {
+				type: "tool_call_run",
+				id: toolCallId,
+				tool_name: event.tool_name,
+				args: event.args,
+				result: null,
+				status: "running",
+				started_at: new Date().toISOString(),
+				completed_at: null,
+			});
+			return;
+		}
+
 		if (channelId) {
 			setLiveStates((prev) => {
 				const state = prev[channelId];
@@ -669,11 +701,25 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 				return prev;
 			});
 		}
-	}, []);
+	}, [pushItem]);
 
 	const handleToolCompleted = useCallback((data: unknown) => {
 		const event = data as ToolCompletedEvent;
 		const channelId = event.channel_id;
+
+		if (channelId && event.process_type === "channel") {
+			const queueKey = `${channelId}:${event.tool_name}`;
+			const queue = pendingChannelToolCallsRef.current[queueKey] ?? [];
+			const toolCallId = queue[0];
+			if (toolCallId) {
+				pendingChannelToolCallsRef.current[queueKey] = queue.slice(1);
+				updateItem(channelId, toolCallId, (item) => {
+					if (item.type !== "tool_call_run") return item;
+					return { ...item, result: event.result, status: "completed", completed_at: new Date().toISOString() };
+				});
+			}
+			return;
+		}
 
 		if (channelId) {
 			setLiveStates((prev) => {

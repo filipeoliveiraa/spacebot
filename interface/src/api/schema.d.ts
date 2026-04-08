@@ -2647,6 +2647,7 @@ export interface components {
             /** Format: int32 */
             api_port: number;
             brave_search_key?: string | null;
+            company_name: string;
             opencode: components["schemas"]["OpenCodeSettingsResponse"];
             ssh_enabled: boolean;
             worker_log_mode: string;
@@ -2657,6 +2658,7 @@ export interface components {
             /** Format: int32 */
             api_port?: number | null;
             brave_search_key?: string | null;
+            company_name?: string | null;
             opencode?: null | components["schemas"]["OpenCodeSettingsUpdate"];
             ssh_enabled?: boolean | null;
             worker_log_mode?: string | null;
@@ -3371,6 +3373,16 @@ export interface components {
             task: string;
             /** @enum {string} */
             type: "worker_run";
+        } | {
+            args: string;
+            completed_at?: string | null;
+            id: string;
+            result?: string | null;
+            started_at: string;
+            status: string;
+            tool_name: string;
+            /** @enum {string} */
+            type: "tool_call_run";
         };
         ToggleCronRequest: {
             agent_id: string;

@@ -13,12 +13,13 @@ export type SectionId =
 	| "memory"
 	| "browser"
 	| "sandbox"
-	| "projects";
+	| "projects"
+	| "ingest";
 
 export interface AgentConfigSection {
 	id: SectionId;
 	label: string;
-	group: "general" | "identity" | "config";
+	group: "general" | "identity" | "config" | "data";
 	description: string;
 	detail: string;
 }

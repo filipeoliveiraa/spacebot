@@ -127,7 +127,7 @@ export function openCodePartToPair(
 	};
 }
 
-function tryParseJson(text: string): Record<string, unknown> | null {
+export function tryParseJson(text: string): Record<string, unknown> | null {
 	if (!text || text.trim().length === 0) return null;
 	try {
 		const parsed = JSON.parse(text);
@@ -144,7 +144,7 @@ function tryParseJson(text: string): Record<string, unknown> | null {
 	}
 }
 
-function isErrorResult(
+export function isErrorResult(
 	text: string,
 	parsed: Record<string, unknown> | null,
 ): boolean {

@@ -17,7 +17,7 @@ import {ChannelDetail} from "@/routes/ChannelDetail";
 import {AgentMemories} from "@/routes/AgentMemories";
 import {AgentConfig} from "@/routes/AgentConfig";
 import {AgentCron} from "@/routes/AgentCron";
-import {AgentIngest} from "@/routes/AgentIngest";
+
 import {AgentSkills} from "@/routes/AgentSkills";
 import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentProjects} from "@/routes/AgentProjects";
@@ -163,14 +163,6 @@ const agentMemoriesRoute = createRoute({
 	},
 });
 
-const agentIngestRoute = createRoute({
-	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/ingest",
-	component: function AgentIngestPage() {
-		const {agentId} = agentIngestRoute.useParams();
-		return <AgentIngest agentId={agentId} />;
-	},
-});
 
 const agentWorkersRoute = createRoute({
 	getParentRoute: () => rootRoute,
@@ -273,7 +265,7 @@ const routeTree = rootRoute.addChildren([
 	agentChatRoute,
 	agentChannelsRoute,
 	agentMemoriesRoute,
-	agentIngestRoute,
+
 	agentWorkersRoute,
 	projectsRoute,
 	agentTasksRoute,

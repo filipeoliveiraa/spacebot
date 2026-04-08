@@ -15,6 +15,7 @@ import {SettingSidebarButton} from "@/ui/SettingSidebarButton";
 import {useSearch, useNavigate} from "@tanstack/react-router";
 import {ModelSelect} from "@/components/ModelSelect";
 import {
+	InstanceSection,
 	AppearanceSection,
 	ChannelsSection,
 	SecretsSection,
@@ -95,6 +96,7 @@ export function Settings() {
 		queryFn: api.globalSettings,
 		staleTime: 5_000,
 		enabled:
+			activeSection === "instance" ||
 			activeSection === "api-keys" ||
 			activeSection === "server" ||
 			activeSection === "opencode" ||
@@ -547,7 +549,12 @@ export function Settings() {
 			{/* Content */}
 			<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
 				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-					{activeSection === "appearance" ? (
+					{activeSection === "instance" ? (
+						<InstanceSection
+							settings={globalSettings}
+							isLoading={globalSettingsLoading}
+						/>
+					) : activeSection === "appearance" ? (
 						<AppearanceSection />
 					) : activeSection === "providers" ? (
 						<div className="mx-auto max-w-2xl px-6 py-6">

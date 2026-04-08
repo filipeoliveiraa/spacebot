@@ -1195,6 +1195,7 @@ fn cmd_skill(
 
                 for info in skills.list() {
                     let source_label = match info.source {
+                        spacebot::skills::SkillSource::Builtin => "builtin",
                         spacebot::skills::SkillSource::Instance => "instance",
                         spacebot::skills::SkillSource::Workspace => "workspace",
                     };
@@ -1238,6 +1239,7 @@ fn cmd_skill(
                 };
 
                 let source_label = match skill.source {
+                    spacebot::skills::SkillSource::Builtin => "builtin",
                     spacebot::skills::SkillSource::Instance => "instance",
                     spacebot::skills::SkillSource::Workspace => "workspace",
                 };

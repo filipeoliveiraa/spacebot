@@ -144,9 +144,24 @@ pub struct ApiState {
     /// recover the transcript without waiting for the worker to complete.
     /// Keyed by worker_id, cleared on worker completion.
     pub live_worker_transcripts: Arc<RwLock<HashMap<String, Vec<TranscriptStep>>>>,
+    /// In-memory cache of tool calls for running channel turns (direct mode).
+    /// Keyed by channel_id, drained when the bot message is persisted.
+    pub live_channel_tool_calls: Arc<RwLock<HashMap<String, Vec<ChannelToolCallEntry>>>>,
     /// Serializes SSH daemon enable/disable transitions to prevent races
     /// between overlapping toggle requests.
     pub ssh_mutex: tokio::sync::Mutex<()>,
+}
+
+/// A single channel-level tool call accumulated in memory during a direct-mode turn.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ChannelToolCallEntry {
+    pub id: String,
+    pub tool_name: String,
+    pub args: String,
+    pub result: Option<String>,
+    pub status: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -351,6 +366,7 @@ impl ApiState {
             agent_groups: ArcSwap::from_pointee(Vec::new()),
             agent_humans: ArcSwap::from_pointee(Vec::new()),
             live_worker_transcripts: Arc::new(RwLock::new(HashMap::new())),
+            live_channel_tool_calls: Arc::new(RwLock::new(HashMap::new())),
             ssh_mutex: tokio::sync::Mutex::new(()),
         }
     }
@@ -401,6 +417,7 @@ impl ApiState {
     ) {
         let api_tx = self.event_tx.clone();
         let live_transcripts = self.live_worker_transcripts.clone();
+        let live_channel_tools = self.live_channel_tool_calls.clone();
         // Snapshot the notification store at registration time. It is set once
         // at startup before any agents register, so the snapshot is always valid.
         let notif_store_snap = self.notification_store.load_full();
@@ -578,6 +595,25 @@ impl ApiState {
                                         steps.push(step);
                                     }
                                 }
+                                // Accumulate channel-level tool calls in memory,
+                                // skipping conversation/routing tools.
+                                if let ProcessId::Channel(ch_id) = process_id {
+                                    if is_hidden_channel_tool(tool_name) {
+                                        // skip
+                                    } else {
+                                        let entry = ChannelToolCallEntry {
+                                            id: uuid::Uuid::new_v4().to_string(),
+                                            tool_name: tool_name.clone(),
+                                            args: args.clone(),
+                                            result: None,
+                                            status: "running".into(),
+                                            started_at: chrono::Utc::now().to_rfc3339(),
+                                            completed_at: None,
+                                        };
+                                        let mut guard = live_channel_tools.write().await;
+                                        guard.entry(ch_id.to_string()).or_default().push(entry);
+                                    }
+                                }
                                 api_tx
                                     .send(ApiEvent::ToolStarted {
                                         agent_id: agent_id.clone(),
@@ -607,6 +643,20 @@ impl ApiState {
                                     let mut guard = live_transcripts.write().await;
                                     if let Some(steps) = guard.get_mut(&worker_id.to_string()) {
                                         steps.push(step);
+                                    }
+                                }
+                                // Complete channel-level tool call in memory (FIFO).
+                                if let ProcessId::Channel(ch_id) = process_id {
+                                    let mut guard = live_channel_tools.write().await;
+                                    if let Some(calls) = guard.get_mut(&ch_id.to_string()) {
+                                        if let Some(entry) = calls.iter_mut().find(|c| {
+                                            c.tool_name == *tool_name && c.status == "running"
+                                        }) {
+                                            entry.result = Some(result.clone());
+                                            entry.status = "completed".into();
+                                            entry.completed_at =
+                                                Some(chrono::Utc::now().to_rfc3339());
+                                        }
                                     }
                                 }
                                 api_tx
@@ -938,10 +988,27 @@ impl ApiState {
         self.agent_humans.store(Arc::new(humans));
     }
 
+    /// Drain accumulated channel tool calls for a channel.
+    ///
+    /// Called when the bot message is about to be persisted so the tool calls
+    /// can be stored in the message metadata.
+    pub async fn take_channel_tool_calls(&self, channel_id: &str) -> Vec<ChannelToolCallEntry> {
+        let mut guard = self.live_channel_tool_calls.write().await;
+        guard.remove(channel_id).unwrap_or_default()
+    }
+
     /// Send an event to all SSE subscribers.
     pub fn send_event(&self, event: ApiEvent) {
         let _ = self.event_tx.send(event);
     }
+}
+
+/// Conversation/routing tools that should not be stored or surfaced as channel tool calls.
+fn is_hidden_channel_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "reply" | "react" | "skip" | "set_outcome" | "spawn_worker" | "branch" | "route" | "cancel"
+    )
 }
 
 /// Extract (process_type, id_string) from a ProcessId.

@@ -18,6 +18,7 @@ import {
 	type SectionId,
 	type SaveHandlerRef,
 } from "@/components/agent-config";
+import {AgentIngest} from "@/routes/AgentIngest";
 
 interface AgentConfigProps {
 	agentId: string;
@@ -180,6 +181,7 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 	const active = SECTIONS.find((s) => s.id === activeSection)!;
 	const isGeneralSection = active.group === "general";
 	const isIdentitySection = active.group === "identity";
+	const isIngestSection = active.id === "ingest";
 	const currentAgent = agentsQuery.data?.agents.find((a) => a.id === agentId);
 	const identityData = identityQuery.data ?? {soul: null, identity: null, role: null};
 
@@ -192,7 +194,9 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 			/>
 
 			<div className="flex flex-1 flex-col overflow-hidden">
-				{isGeneralSection ? (
+				{isIngestSection ? (
+					<AgentIngest agentId={agentId} />
+				) : isGeneralSection ? (
 					<GeneralEditor
 						key={active.id}
 						agentId={agentId}
@@ -235,12 +239,14 @@ export function AgentConfig({agentId}: AgentConfigProps) {
 				)}
 			</div>
 
-			<SaveBar
-				dirty={dirty}
-				saving={saving}
-				onSave={handleSave}
-				onRevert={handleRevert}
-			/>
+			{!isIngestSection && (
+				<SaveBar
+					dirty={dirty}
+					saving={saving}
+					onSave={handleSave}
+					onRevert={handleRevert}
+				/>
+			)}
 		</div>
 	);
 }

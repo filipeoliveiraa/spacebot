@@ -1,3 +1,4 @@
+export {InstanceSection} from "./InstanceSection";
 export {AppearanceSection} from "./AppearanceSection";
 export {ChannelsSection} from "./ChannelsSection";
 export {SecretsSection} from "./SecretsSection";

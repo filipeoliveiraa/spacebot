@@ -3,6 +3,7 @@ import {useQuery} from "@tanstack/react-query";
 import {Markdown, MessageBubble} from "@spacedrive/ai";
 import {File as FileIcon} from "@phosphor-icons/react";
 import {api, type AttachmentMeta, type TimelineItem, type WorkerListItem} from "@/api/client";
+import {ToolCall, type ToolCallPair, tryParseJson, isErrorResult} from "@/components/ToolCall";
 import {PortalWorkerCard} from "./PortalWorkerCard";
 import clsx from "clsx";
 
@@ -283,6 +284,28 @@ export function PortalTimeline({
 						return (
 							<div key={item.id} className="py-2">
 								<PortalWorkerCard agentId={agentId} worker={worker} />
+							</div>
+						);
+					}
+					if (item.type === "tool_call_run") {
+						const parsedArgs = tryParseJson(item.args);
+						const parsedResult = item.result ? tryParseJson(item.result) : null;
+						const pair: ToolCallPair = {
+							id: item.id,
+							name: item.tool_name,
+							argsRaw: item.args,
+							args: parsedArgs,
+							resultRaw: item.result ?? null,
+							result: parsedResult,
+							status: item.status === "running"
+								? "running"
+								: item.result && isErrorResult(item.result, parsedResult)
+									? "error"
+									: "completed",
+						};
+						return (
+							<div key={item.id} className="py-1">
+								<ToolCall pair={pair} />
 							</div>
 						);
 					}

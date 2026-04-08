@@ -108,21 +108,36 @@ impl ConversationLogger {
         content: &str,
         sender_name: Option<&str>,
     ) {
+        self.log_bot_message_with_metadata(channel_id, content, sender_name, None);
+    }
+
+    /// Log a bot message with optional tool calls packed into metadata. Fire-and-forget.
+    pub fn log_bot_message_with_metadata(
+        &self,
+        channel_id: &ChannelId,
+        content: &str,
+        sender_name: Option<&str>,
+        tool_calls_json: Option<String>,
+    ) {
         let pool = self.pool.clone();
         let id = uuid::Uuid::new_v4().to_string();
         let channel_id = channel_id.to_string();
         let content = content.to_string();
         let sender_name = sender_name.map(String::from);
 
+        // Pack tool_calls into the metadata JSON if present.
+        let metadata_json = tool_calls_json.map(|tc| format!(r#"{{"tool_calls":{tc}}}"#));
+
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, content) \
-                 VALUES (?, ?, 'assistant', ?, ?)",
+                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, content, metadata) \
+                 VALUES (?, ?, 'assistant', ?, ?, ?)",
             )
             .bind(&id)
             .bind(&channel_id)
             .bind(&sender_name)
             .bind(&content)
+            .bind(&metadata_json)
             .execute(&pool)
             .await
             {
@@ -267,6 +282,15 @@ pub enum TimelineItem {
     WorkerRun {
         id: String,
         task: String,
+        result: Option<String>,
+        status: String,
+        started_at: String,
+        completed_at: Option<String>,
+    },
+    ToolCallRun {
+        id: String,
+        tool_name: String,
+        args: String,
         result: Option<String>,
         status: String,
         started_at: String,
@@ -770,13 +794,16 @@ impl ProcessRunLogger {
 
         let mut items: Vec<TimelineItem> = rows
             .into_iter()
-            .filter_map(|row| {
+            .filter_map(|row| -> Option<Vec<TimelineItem>> {
                 let item_type: String = row.try_get("item_type").ok()?;
                 match item_type.as_str() {
                     "message" => {
                         let metadata_json: Option<String> = row.try_get("metadata").ok().flatten();
-                        let attachments = metadata_json
-                            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                        let metadata_value = metadata_json
+                            .as_deref()
+                            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+                        let attachments = metadata_value
+                            .as_ref()
                             .and_then(|v| v.get("attachments").cloned())
                             .and_then(|a| {
                                 serde_json::from_value::<
@@ -785,7 +812,31 @@ impl ProcessRunLogger {
                                 .ok()
                             })
                             .unwrap_or_default();
-                        Some(TimelineItem::Message {
+
+                        // Expand tool calls stored in message metadata into ToolCallRun items.
+                        let tool_call_items: Vec<TimelineItem> = metadata_value
+                            .as_ref()
+                            .and_then(|v| v.get("tool_calls"))
+                            .and_then(|tc| {
+                                serde_json::from_value::<Vec<crate::api::ChannelToolCallEntry>>(
+                                    tc.clone(),
+                                )
+                                .ok()
+                            })
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|tc| TimelineItem::ToolCallRun {
+                                id: tc.id,
+                                tool_name: tc.tool_name,
+                                args: tc.args,
+                                result: tc.result,
+                                status: tc.status,
+                                started_at: tc.started_at,
+                                completed_at: tc.completed_at,
+                            })
+                            .collect();
+
+                        let message = TimelineItem::Message {
                             id: row.try_get("id").unwrap_or_default(),
                             role: row.try_get("role").unwrap_or_default(),
                             sender_name: row.try_get("sender_name").ok().flatten(),
@@ -796,9 +847,14 @@ impl ProcessRunLogger {
                                 .map(|t| t.to_rfc3339())
                                 .unwrap_or_default(),
                             attachments,
-                        })
+                        };
+
+                        // Tool calls come before the message they belong to.
+                        let mut result = tool_call_items;
+                        result.push(message);
+                        Some(result)
                     }
-                    "branch_run" => Some(TimelineItem::BranchRun {
+                    "branch_run" => Some(vec![TimelineItem::BranchRun {
                         id: row.try_get("id").unwrap_or_default(),
                         description: row.try_get("description").unwrap_or_default(),
                         conclusion: row.try_get("conclusion").ok(),
@@ -810,8 +866,8 @@ impl ProcessRunLogger {
                             .try_get::<chrono::DateTime<chrono::Utc>, _>("completed_at")
                             .ok()
                             .map(|t| t.to_rfc3339()),
-                    }),
-                    "worker_run" => Some(TimelineItem::WorkerRun {
+                    }]),
+                    "worker_run" => Some(vec![TimelineItem::WorkerRun {
                         id: row.try_get("id").unwrap_or_default(),
                         task: row.try_get("task").unwrap_or_default(),
                         result: row.try_get("result").ok(),
@@ -824,10 +880,11 @@ impl ProcessRunLogger {
                             .try_get::<chrono::DateTime<chrono::Utc>, _>("completed_at")
                             .ok()
                             .map(|t| t.to_rfc3339()),
-                    }),
+                    }]),
                     _ => None,
                 }
             })
+            .flatten()
             .collect();
 
         // Reverse to chronological order

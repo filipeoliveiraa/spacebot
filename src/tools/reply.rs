@@ -1,5 +1,6 @@
 //! Reply tool for sending messages to users (channel only).
 
+use crate::api::ApiState;
 use crate::conversation::ConversationLogger;
 use crate::{ChannelId, OutboundResponse, RoutedSender};
 use regex::Regex;
@@ -43,7 +44,7 @@ pub enum ReplyTarget {
 /// accumulator for cron jobs. The channel process creates a response sender per
 /// conversation turn and the tool routes replies through it. This is compatible
 /// with Rig's ToolServer which registers tools once and shares them across calls.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReplyTool {
     target: ReplyTarget,
     conversation_id: String,
@@ -51,6 +52,17 @@ pub struct ReplyTool {
     channel_id: ChannelId,
     replied_flag: RepliedFlag,
     agent_display_name: String,
+    api_state: Option<Arc<ApiState>>,
+}
+
+impl std::fmt::Debug for ReplyTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplyTool")
+            .field("conversation_id", &self.conversation_id)
+            .field("channel_id", &self.channel_id)
+            .field("agent_display_name", &self.agent_display_name)
+            .finish()
+    }
 }
 
 impl ReplyTool {
@@ -62,6 +74,7 @@ impl ReplyTool {
         channel_id: ChannelId,
         replied_flag: RepliedFlag,
         agent_display_name: impl Into<String>,
+        api_state: Option<Arc<ApiState>>,
     ) -> Self {
         Self {
             target,
@@ -70,6 +83,7 @@ impl ReplyTool {
             channel_id,
             replied_flag,
             agent_display_name: agent_display_name.into(),
+            api_state,
         }
     }
 }
@@ -485,10 +499,22 @@ impl Tool for ReplyTool {
                     .await
                     .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
 
-                self.conversation_logger.log_bot_message_with_name(
+                // Drain accumulated channel tool calls and pack into message metadata.
+                let tool_calls_json = if let Some(ref api_state) = self.api_state {
+                    let calls = api_state.take_channel_tool_calls(&self.channel_id).await;
+                    if calls.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&calls).ok()
+                    }
+                } else {
+                    None
+                };
+                self.conversation_logger.log_bot_message_with_metadata(
                     &self.channel_id,
                     &converted_content,
                     Some(&self.agent_display_name),
+                    tool_calls_json,
                 );
 
                 tracing::debug!(conversation_id = %self.conversation_id, "reply sent to outbound channel");

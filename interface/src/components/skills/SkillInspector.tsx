@@ -46,6 +46,8 @@ export function SkillInspector({
 			(installedNames.has(`${selected.skill.source}/${selected.skill.name}`.toLowerCase()) ||
 				installedNames.has(selected.skill.name.toLowerCase())));
 
+	const isBuiltin = selected.type === "installed" && selected.skill.source === "builtin";
+
 	const installedContentQuery = useQuery({
 		queryKey: ["skill-content", agentId, selected.type === "installed" ? selected.skill.name : null],
 		queryFn: () => api.getSkillContent(agentId, (selected as {type: "installed"; skill: {name: string}}).skill.name),
@@ -70,15 +72,9 @@ export function SkillInspector({
 		(selected.type === "installed" && installedContentQuery.isLoading) ||
 		(selected.type === "registry" && registryContentQuery.isLoading);
 
-	const skillName =
-		selected.type === "bundled" ? selected.skill.name : selected.skill.name;
+	const skillName = selected.skill.name;
 
-	const skillDescription =
-		selected.type === "installed"
-			? selected.skill.description
-			: selected.type === "registry"
-				? selected.skill.description
-				: selected.skill.description;
+	const skillDescription = selected.skill.description;
 
 	const sourceRepo =
 		selected.type === "installed"
@@ -90,9 +86,7 @@ export function SkillInspector({
 	const content =
 		selected.type === "installed"
 			? installedContentQuery.data?.content
-			: selected.type === "registry"
-				? registryContentQuery.data?.content
-				: selected.skill.content;
+			: registryContentQuery.data?.content;
 
 	const basePath =
 		selected.type === "installed" ? installedContentQuery.data?.base_dir : null;
@@ -104,14 +98,9 @@ export function SkillInspector({
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2">
 						<h3 className="truncate text-sm font-semibold text-ink">{skillName}</h3>
-						{selected.type === "bundled" && (
-							<Badge variant="secondary" size="sm" className="shrink-0">
-								bundled
-							</Badge>
-						)}
 						{selected.type === "installed" && (
 							<Badge
-								variant={selected.skill.source === "instance" ? "default" : "success"}
+								variant={isBuiltin ? "secondary" : selected.skill.source === "instance" ? "default" : "success"}
 								size="sm"
 								className="shrink-0"
 							>
@@ -168,8 +157,8 @@ export function SkillInspector({
 				</div>
 			)}
 
-			{/* Action */}
-			{selected.type !== "bundled" && (
+			{/* Action — hidden for builtin skills */}
+			{!isBuiltin && (
 				<div className="border-b border-app-line/50 px-4 py-3">
 					{selected.type === "installed" ? (
 						<Button

@@ -881,6 +881,16 @@ impl CortexChatSession {
                                 transcript.push_str(&format!("*[Worker: {task}]*: {result}\n\n"));
                             }
                         }
+                        crate::conversation::history::TimelineItem::ToolCallRun {
+                            tool_name,
+                            result,
+                            ..
+                        } => {
+                            if let Some(result) = result {
+                                transcript
+                                    .push_str(&format!("*[Tool: {tool_name}]*: {result}\n\n"));
+                            }
+                        }
                     }
                 }
                 Some(transcript)

@@ -8,8 +8,9 @@ import {
 	type MouseEvent,
 } from "react";
 import {Link} from "@tanstack/react-router";
+import {useQuery} from "@tanstack/react-query";
 import {SelectPill} from "@spacedrive/primitives";
-import {BASE_PATH} from "@/api/client";
+import {api, BASE_PATH} from "@/api/client";
 import {IS_TAURI, startDragging} from "@/platform";
 
 // ── Context ──────────────────────────────────────────────────────────────
@@ -80,6 +81,14 @@ export function TopBar() {
 	const store = useContext(TopBarContext);
 	if (!store) throw new Error("TopBar must be used within TopBarProvider");
 
+	const { data: globalSettings } = useQuery({
+		queryKey: ["global-settings"],
+		queryFn: api.globalSettings,
+		staleTime: 10_000,
+	});
+
+	const companyName = globalSettings?.company_name ?? "My Company";
+
 	const content = useSyncExternalStore(
 		store.subscribe,
 		store.getSnapshot,
@@ -110,7 +119,7 @@ export function TopBar() {
 				/* Web: ball icon block matching sidebar width + border */
 				<div className="flex w-[220px] shrink-0 items-center border-r border-app-line bg-sidebar px-3">
 					<SelectPill variant="sidebar" size="md" className="w-full">
-						<span className="font-semibold">Spacedrive Inc.</span>
+						<span className="font-semibold">{companyName}</span>
 					</SelectPill>
 				</div>
 			)}

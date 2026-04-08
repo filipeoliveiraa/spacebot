@@ -72,6 +72,24 @@ export function ConfigSidebar({
 					</SettingSidebarButton>
 				))}
 			</div>
+
+			{/* Data Group */}
+			<div className="px-3 pb-1 pt-4 mt-2">
+				<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">
+					Data
+				</span>
+			</div>
+			<div className="flex flex-col gap-0.5 px-2 pb-3">
+				{SECTIONS.filter((s) => s.group === "data").map((section) => (
+					<SettingSidebarButton
+						key={section.id}
+						onClick={() => onSectionChange(section.id)}
+						active={activeSection === section.id}
+					>
+						<span className="flex-1">{section.label}</span>
+					</SettingSidebarButton>
+				))}
+			</div>
 		</div>
 	);
 }

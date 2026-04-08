@@ -777,6 +777,7 @@ pub(super) async fn inspect_prompt(
             None, // backfill_transcript — only set during channel initialization
             empty_to_none(working_memory),
             empty_to_none(channel_activity_map),
+            false, // direct_mode — resolved at runtime by the channel, not available here
         )
         .unwrap_or_default();
 

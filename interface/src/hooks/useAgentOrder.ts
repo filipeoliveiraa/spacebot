@@ -23,15 +23,35 @@ export function useAgentOrder(agentIds: string[]) {
 		}
 
 		// Merge: keep stored order for existing agents, append new agents
+		// The first agent from the API is the default/main agent — always pin it first
 		const storedSet = new Set(storedOrder);
 		const newAgents = agentIds.filter((id) => !storedSet.has(id));
 		const validStoredOrder = storedOrder.filter((id) => agentIds.includes(id));
-		
-		setOrder([...validStoredOrder, ...newAgents]);
+		const merged = [...validStoredOrder, ...newAgents];
+
+		const mainId = agentIds[0];
+		if (mainId && merged[0] !== mainId) {
+			const idx = merged.indexOf(mainId);
+			if (idx > 0) {
+				merged.splice(idx, 1);
+				merged.unshift(mainId);
+			}
+		}
+
+		setOrder(merged);
 	}, [agentIds]);
 
-	// Persist order to localStorage
+	// Persist order to localStorage, keeping the main agent pinned first
 	const updateOrder = (newOrder: string[]) => {
+		const mainId = agentIds[0];
+		if (mainId && newOrder[0] !== mainId) {
+			const idx = newOrder.indexOf(mainId);
+			if (idx > 0) {
+				newOrder = [...newOrder];
+				newOrder.splice(idx, 1);
+				newOrder.unshift(mainId);
+			}
+		}
 		setOrder(newOrder);
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(newOrder));
 	};

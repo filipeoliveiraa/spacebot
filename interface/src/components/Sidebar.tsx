@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link, useMatchRoute } from "@tanstack/react-router";
+import { Link, useMatchRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
 	DndContext,
@@ -21,8 +21,8 @@ import { CSS } from "@dnd-kit/utilities";
 import { api, getApiBase } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { useAgentOrder } from "@/hooks/useAgentOrder";
-import { House, TreeStructure, Wrench, CheckSquare, GearSix, DotsThree, ChatCircleDots, Broadcast, Brain, Lightning, CalendarDots, SlidersHorizontal, BookBookmark } from "@phosphor-icons/react";
-import { CircleButton, SelectPill } from "@spacedrive/primitives";
+import { House, TreeStructure, Wrench, CheckSquare, GearSix, DotsThree, ChatCircleDots, Broadcast, Brain, Lightning, CalendarDots, SlidersHorizontal, BookBookmark, Plus, PencilSimple } from "@phosphor-icons/react";
+import { CircleButton, SelectPill, Popover, OptionList, OptionListItem, DialogRoot, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Button } from "@spacedrive/primitives";
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 import { WorkersPanelButton } from "@/components/WorkersPanel";
@@ -143,9 +143,20 @@ const navItems = [
 ] as const;
 
 export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
+	const navigate = useNavigate();
 	const [createOpen, setCreateOpen] = useState(false);
 	const [expandedAgent, setExpandedAgent] = useState<string | null>(null);
 	const [hasDefaulted, setHasDefaulted] = useState(false);
+	const [switcherOpen, setSwitcherOpen] = useState(false);
+	const [comingSoonOpen, setComingSoonOpen] = useState(false);
+
+	const { data: globalSettings } = useQuery({
+		queryKey: ["global-settings"],
+		queryFn: api.globalSettings,
+		staleTime: 10_000,
+	});
+
+	const companyName = globalSettings?.company_name ?? "My Company";
 
 	const { data: agentsData } = useQuery({
 		queryKey: ["agents"],
@@ -216,9 +227,41 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 		<aside className="flex w-[220px] shrink-0 flex-col bg-sidebar">
 			{/* Company switcher */}
 			<div className="px-3 pt-3">
-				<SelectPill variant="sidebar" size="md" className="w-full">
-					<span className="font-semibold">Spacedrive Inc.</span>
-				</SelectPill>
+				<Popover.Root open={switcherOpen} onOpenChange={setSwitcherOpen}>
+					<Popover.Trigger asChild>
+						<SelectPill variant="sidebar" size="md" className="w-full">
+							<span className="font-semibold">{companyName}</span>
+						</SelectPill>
+					</Popover.Trigger>
+					<Popover.Content align="start" sideOffset={8} className="min-w-[200px] p-2">
+						<OptionList>
+							<OptionListItem selected>
+								{companyName}
+							</OptionListItem>
+						</OptionList>
+						<div className="my-2 h-px bg-app-line" />
+						<OptionList>
+							<OptionListItem
+								onClick={() => {
+									setSwitcherOpen(false);
+									setComingSoonOpen(true);
+								}}
+							>
+								<Plus className="size-4" />
+								<span>Add Instance</span>
+							</OptionListItem>
+							<OptionListItem
+								onClick={() => {
+									setSwitcherOpen(false);
+									navigate({ to: "/settings", search: { tab: "instance" } });
+								}}
+							>
+								<PencilSimple className="size-4" />
+								<span>Edit</span>
+							</OptionListItem>
+						</OptionList>
+					</Popover.Content>
+				</Popover.Root>
 			</div>
 
 			{/* Primary nav */}
@@ -360,6 +403,22 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 			{agents[0] && (
 				<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} agentId={agents[0].id} />
 			)}
+
+			<DialogRoot open={comingSoonOpen} onOpenChange={setComingSoonOpen}>
+				<DialogContent className="max-w-sm">
+					<DialogHeader>
+						<DialogTitle>Add Instance</DialogTitle>
+						<DialogDescription>
+							Multi-instance support is coming soon. You'll be able to connect to additional Spacebot instances from here.
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button onClick={() => setComingSoonOpen(false)} size="md">
+							Close
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</DialogRoot>
 		</aside>
 	);
 }

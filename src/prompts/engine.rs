@@ -567,6 +567,7 @@ impl PromptEngine {
             None,
             None,
             None,
+            false,
         )
     }
 
@@ -676,6 +677,7 @@ impl PromptEngine {
         backfill_transcript: Option<String>,
         working_memory: Option<String>,
         channel_activity_map: Option<String>,
+        direct_mode: bool,
     ) -> Result<String> {
         // During the transition, the bulletin is also exposed as knowledge_synthesis
         // so the template can render it under the new heading.
@@ -700,6 +702,7 @@ impl PromptEngine {
                 working_memory => working_memory,
                 channel_activity_map => channel_activity_map,
                 knowledge_synthesis => knowledge_synthesis,
+                direct_mode => direct_mode,
             },
         )
     }

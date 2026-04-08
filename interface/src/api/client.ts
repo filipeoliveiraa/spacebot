@@ -848,6 +848,7 @@ export interface OpenCodeSettingsUpdate {
 }
 
 export interface GlobalSettingsUpdate {
+	company_name?: string;
 	brave_search_key?: string | null;
 	api_enabled?: boolean;
 	api_port?: number;
@@ -863,7 +864,7 @@ export interface SkillInfo {
 	description: string;
 	file_path: string;
 	base_dir: string;
-	source: "instance" | "workspace";
+	source: "builtin" | "instance" | "workspace";
 	source_repo?: string;
 }
 

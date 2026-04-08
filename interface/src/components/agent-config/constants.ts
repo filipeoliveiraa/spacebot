@@ -105,6 +105,14 @@ export const SECTIONS: AgentConfigSection[] = [
 		detail:
 			"Controls how the agent manages project workspaces, git repos, and worktrees. Use worktrees for parallel feature branches, auto-discover to scan for repos on project creation, and set a disk usage warning threshold.",
 	},
+	{
+		id: "ingest",
+		label: "Ingest",
+		group: "data",
+		description: "File upload & processing",
+		detail:
+			"Upload documents to be chunked and processed into structured memories. Supported formats include PDF, text, markdown, JSON, CSV, YAML, TOML, HTML, and more.",
+	},
 ];
 
 export const GRADIENT_PRESETS: {label: string; start: string; end: string}[] = [

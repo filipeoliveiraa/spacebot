@@ -2,6 +2,12 @@ import type {SectionId} from "./types";
 
 export const SECTIONS = [
 	{
+		id: "instance" as const,
+		label: "Instance",
+		group: "general" as const,
+		description: "Instance name and identity",
+	},
+	{
 		id: "providers" as const,
 		label: "Providers",
 		group: "general" as const,

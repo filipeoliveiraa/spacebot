@@ -283,6 +283,14 @@ pub struct FileWriteTool {
     context: FileContext,
 }
 
+impl FileWriteTool {
+    pub fn new(workspace: std::path::PathBuf, sandbox: Arc<crate::sandbox::Sandbox>) -> Self {
+        Self {
+            context: FileContext::new(workspace, sandbox),
+        }
+    }
+}
+
 /// Arguments for file_write.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FileWriteArgs {
@@ -364,6 +372,14 @@ impl Tool for FileWriteTool {
 #[derive(Debug, Clone)]
 pub struct FileEditTool {
     context: FileContext,
+}
+
+impl FileEditTool {
+    pub fn new(workspace: std::path::PathBuf, sandbox: Arc<crate::sandbox::Sandbox>) -> Self {
+        Self {
+            context: FileContext::new(workspace, sandbox),
+        }
+    }
 }
 
 /// Arguments for file_edit.
@@ -477,6 +493,14 @@ impl Tool for FileEditTool {
 #[derive(Debug, Clone)]
 pub struct FileListTool {
     context: FileContext,
+}
+
+impl FileListTool {
+    pub fn new(workspace: std::path::PathBuf, sandbox: Arc<crate::sandbox::Sandbox>) -> Self {
+        Self {
+            context: FileContext::new(workspace, sandbox),
+        }
+    }
 }
 
 /// Arguments for file_list.

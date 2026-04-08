@@ -1,6 +1,7 @@
 import type {GlobalSettingsResponse} from "@/api/client";
 
 export type SectionId =
+	| "instance"
 	| "appearance"
 	| "providers"
 	| "channels"

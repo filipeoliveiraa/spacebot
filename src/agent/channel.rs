@@ -902,6 +902,17 @@ impl Channel {
         self.response_tx.send(routed).await
     }
 
+    /// Drain accumulated channel tool calls from ApiState and serialize as JSON.
+    /// Returns `None` if there are no tool calls or ApiState is unavailable.
+    async fn drain_tool_calls_json(&self) -> Option<String> {
+        let api_state = self.state.deps.api_state.as_ref()?;
+        let calls = api_state.take_channel_tool_calls(&self.id).await;
+        if calls.is_empty() {
+            return None;
+        }
+        serde_json::to_string(&calls).ok()
+    }
+
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
         match self.send_routed(OutboundResponse::Text(text.clone())).await {
             Ok(()) => {
@@ -913,11 +924,15 @@ impl Channel {
                         .with_label_values(&[&self.deps.agent_id, channel_type])
                         .inc();
                 }
-                self.state.conversation_logger.log_bot_message_with_name(
-                    &self.state.channel_id,
-                    &text,
-                    Some(self.agent_display_name()),
-                );
+                let tool_calls_json = self.drain_tool_calls_json().await;
+                self.state
+                    .conversation_logger
+                    .log_bot_message_with_metadata(
+                        &self.state.channel_id,
+                        &text,
+                        Some(self.agent_display_name()),
+                        tool_calls_json,
+                    );
             }
             Err(error) => {
                 #[cfg(feature = "metrics")]
@@ -1732,6 +1747,8 @@ impl Channel {
         let model_name = routing.resolve(ProcessType::Channel, None).to_string();
         let tool_use_enforcement = rc.tool_use_enforcement.load();
 
+        let direct_mode = self.resolved_settings.delegation == DelegationMode::Direct;
+
         let system_prompt = prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
             memory_bulletin_text,
@@ -1748,6 +1765,7 @@ impl Channel {
             self.backfill_transcript.clone(),
             empty_to_none(working_memory),
             empty_to_none(channel_activity_map),
+            direct_mode,
         )?;
 
         prompt_engine.maybe_append_tool_use_enforcement(
@@ -2385,6 +2403,7 @@ impl Channel {
         let routing = rc.routing.load();
         let model_name = routing.resolve(ProcessType::Channel, None).to_string();
         let tool_use_enforcement = rc.tool_use_enforcement.load();
+        let direct_mode = self.resolved_settings.delegation == DelegationMode::Direct;
 
         let system_prompt = prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
@@ -2402,6 +2421,7 @@ impl Channel {
             self.backfill_transcript.clone(),
             empty_to_none(working_memory),
             empty_to_none(channel_activity_map),
+            direct_mode,
         )?;
 
         prompt_engine.maybe_append_tool_use_enforcement(
@@ -2631,9 +2651,15 @@ impl Channel {
             )
         };
 
-        if let Err(error) =
-            crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
-        {
+        let remove_result = match self.resolved_settings.delegation {
+            DelegationMode::Direct => {
+                crate::tools::remove_direct_mode_tools(&self.tool_server, allow_direct_reply).await
+            }
+            DelegationMode::Standard => {
+                crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+            }
+        };
+        if let Err(error) = remove_result {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
@@ -2872,11 +2898,15 @@ impl Channel {
                             if extracted.is_some() {
                                 tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
                             }
-                            self.state.conversation_logger.log_bot_message_with_name(
-                                &self.state.channel_id,
-                                &final_text,
-                                Some(self.agent_display_name()),
-                            );
+                            let tool_calls_json = self.drain_tool_calls_json().await;
+                            self.state
+                                .conversation_logger
+                                .log_bot_message_with_metadata(
+                                    &self.state.channel_id,
+                                    &final_text,
+                                    Some(self.agent_display_name()),
+                                    tool_calls_json,
+                                );
                             self.send_outbound_text(final_text, "failed to send fallback reply")
                                 .await;
                         }
