@@ -92,7 +92,8 @@ export function PortalHeader({
 						<PopoverTrigger asChild>
 							<Button variant="gray" size="md">
 								<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-								{activeWorkers.length} worker{activeWorkers.length !== 1 ? "s" : ""}
+								{activeWorkers.length} worker
+								{activeWorkers.length !== 1 ? "s" : ""}
 							</Button>
 						</PopoverTrigger>
 						<PopoverContent
@@ -109,7 +110,6 @@ export function PortalHeader({
 
 			<div className="flex items-center gap-2">
 				<Button variant="gray" size="md" onClick={onNewConversation}>
-					{/* <Plus className="mr-1 size-3.5" weight="bold" /> */}
 					New conversation
 				</Button>
 

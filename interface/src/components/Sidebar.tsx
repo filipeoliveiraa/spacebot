@@ -26,7 +26,7 @@ import { CircleButton, SelectPill, Popover, OptionList, OptionListItem, DialogRo
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 import { WorkersPanelButton } from "@/components/WorkersPanel";
-import { IS_MACOS } from "@/platform";
+import { IS_DESKTOP, IS_MACOS } from "@/platform";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
@@ -229,7 +229,7 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 	return (
 		<aside className="flex w-[220px] shrink-0 flex-col bg-sidebar">
 			{/* Company switcher */}
-			<div className={`px-3 ${IS_MACOS ? "pt-[50px]" : "pt-3"}`}>
+			<div className={`px-3 ${IS_DESKTOP && IS_MACOS ? "pt-[50px]" : "pt-3"}`}>
 				<Popover.Root open={switcherOpen} onOpenChange={setSwitcherOpen}>
 					<Popover.Trigger asChild>
 						<SelectPill variant="sidebar" size="md" className="w-full">

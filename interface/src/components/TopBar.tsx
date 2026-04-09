@@ -111,8 +111,8 @@ export function TopBar() {
 			onMouseDown={handleMouseDown}
 		>
 			{/* Left corner block */}
-			{IS_MACOS ? (
-				/* Desktop macOS: padding for traffic lights */
+			{IS_DESKTOP && IS_MACOS ? (
+				/* Padding for native traffic lights */
 				<div className="w-[72px] shrink-0" />
 			) : (
 				/* Browser/non-mac desktop: ball icon block matching sidebar width + border */
