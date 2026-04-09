@@ -1,5 +1,6 @@
 import { ActionItemsCard } from "@/components/dashboard/ActionItemsCard";
 import { TokenUsageCard } from "@/components/dashboard/TokenUsageCard";
+import { ActivityCard } from "@/components/dashboard/ActivityCard";
 import { RecentActivityCard } from "@/components/dashboard/RecentActivityCard";
 
 
@@ -13,7 +14,10 @@ export function Dashboard() {
 						<TokenUsageCard />
 					</div>
 
-					{/* Recent Activity: full width */}
+					<div className="mt-5">
+						<ActivityCard />
+					</div>
+
 					<div className="mt-5">
 						<RecentActivityCard />
 					</div>

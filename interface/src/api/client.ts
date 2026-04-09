@@ -2550,6 +2550,14 @@ export const api = {
 		const query = qs.toString();
 		return fetchJson<UsageResponse>(`/usage${query ? `?${query}` : ""}`);
 	},
+
+	activity: (params?: { since?: string; until?: string }) => {
+		const qs = new URLSearchParams();
+		if (params?.since) qs.set("since", params.since);
+		if (params?.until) qs.set("until", params.until);
+		const query = qs.toString();
+		return fetchJson<ActivityResponse>(`/activity${query ? `?${query}` : ""}`);
+	},
 }
 
 export interface UsageTotals {
@@ -2580,6 +2588,50 @@ export interface UsageResponse {
 	by_day?: Array<{ date: string } & UsageTotals>;
 	by_agent?: Array<{ agent_id: string } & UsageTotals>;
 };
+
+// Activity types
+export interface ProcessTokens {
+	input: number;
+	output: number;
+	cache_read: number;
+	reasoning: number;
+	cost_usd: number;
+}
+
+export interface TokenSummary {
+	input: number;
+	output: number;
+	cache_read: number;
+	reasoning: number;
+	cost_usd: number;
+	by_process: Record<string, ProcessTokens>;
+}
+
+export interface ActivityDay {
+	date: string;
+	messages: number;
+	branches: number;
+	workers: number;
+	cortex: number;
+	cron: number;
+	active_channels: number;
+	tokens: TokenSummary;
+}
+
+export interface ActivityTotals {
+	messages: number;
+	branches: number;
+	workers: number;
+	cortex: number;
+	cron: number;
+	active_channels: number;
+	tokens: TokenSummary;
+}
+
+export interface ActivityResponse {
+	daily: ActivityDay[];
+	totals: ActivityTotals;
+}
 
 // Wiki types
 export type WikiPageType = "entity" | "concept" | "decision" | "project" | "reference";
