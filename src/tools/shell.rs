@@ -9,6 +9,7 @@
 //! skip streaming and just collect output.
 
 use crate::sandbox::Sandbox;
+use crate::tools::ToolCallRegistry;
 use crate::{AgentId, ChannelId, ProcessEvent, ProcessId};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -50,6 +51,7 @@ pub struct ShellTool {
     process_id: Option<ProcessId>,
     channel_id: Option<ChannelId>,
     agent_id: Option<AgentId>,
+    tool_call_registry: Option<ToolCallRegistry>,
 }
 
 impl ShellTool {
@@ -61,6 +63,7 @@ impl ShellTool {
             process_id: None,
             channel_id: None,
             agent_id: None,
+            tool_call_registry: None,
         }
     }
 
@@ -71,11 +74,13 @@ impl ShellTool {
         process_id: ProcessId,
         channel_id: Option<ChannelId>,
         agent_id: AgentId,
+        tool_call_registry: ToolCallRegistry,
     ) -> Self {
         self.tool_output_tx = Some(tool_output_tx);
         self.process_id = Some(process_id);
         self.channel_id = channel_id;
         self.agent_id = Some(agent_id);
+        self.tool_call_registry = Some(tool_call_registry);
         self
     }
 }
@@ -132,6 +137,33 @@ struct StreamContext {
     stream_name: String,
     last_output_ms: Arc<AtomicU64>,
     interactive_detected: Arc<AtomicBool>,
+    prompt_hint_detected: Arc<AtomicBool>,
+}
+
+fn has_interactive_prompt_hint(line: &str) -> bool {
+    let normalized = line.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    [
+        "[y/n]",
+        "[y/n]:",
+        "[y/n]?",
+        "[y/n/q]",
+        "(y/n)",
+        "yes/no",
+        "press enter",
+        "enter to continue",
+        "continue? [y",
+        "are you sure",
+        "do you want to continue",
+        "password:",
+        "passphrase",
+        "accept? [y",
+    ]
+    .iter()
+    .any(|hint| normalized.contains(hint))
 }
 
 async fn stream_lines<R: AsyncBufRead + Unpin>(mut reader: R, ctx: &StreamContext) -> String {
@@ -144,6 +176,9 @@ async fn stream_lines<R: AsyncBufRead + Unpin>(mut reader: R, ctx: &StreamContex
         match reader.read_line(&mut line).await {
             Ok(0) => break,
             Ok(_) => {
+                if has_interactive_prompt_hint(&line) {
+                    ctx.prompt_hint_detected.store(true, Ordering::SeqCst);
+                }
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -182,6 +217,7 @@ async fn stream_lines<R: AsyncBufRead + Unpin>(mut reader: R, ctx: &StreamContex
 fn spawn_quiesce_watchdog(
     last_output_ms: Arc<AtomicU64>,
     interactive_detected: Arc<AtomicBool>,
+    prompt_hint_detected: Arc<AtomicBool>,
     child: Arc<tokio::sync::Mutex<tokio::process::Child>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -192,7 +228,7 @@ fn spawn_quiesce_watchdog(
                 .unwrap_or_default()
                 .as_millis() as u64;
             let last = last_output_ms.load(Ordering::SeqCst);
-            if now_ms.saturating_sub(last) > 5000 {
+            if now_ms.saturating_sub(last) > 5000 && prompt_hint_detected.load(Ordering::SeqCst) {
                 interactive_detected.store(true, Ordering::SeqCst);
                 // Kill the child to unblock stream_lines tasks blocked in read_line()
                 let lock_result =
@@ -267,6 +303,19 @@ impl Tool for ShellTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // Reserve the lifecycle call ID up-front so validation errors cannot
+        // leave stale IDs queued for later shell invocations.
+        let streaming_call_id = self.tool_output_tx.as_ref().map(|_| {
+            self.tool_call_registry
+                .as_ref()
+                .and_then(|registry| {
+                    self.process_id
+                        .as_ref()
+                        .and_then(|process_id| registry.take(process_id, Self::NAME))
+                })
+                .unwrap_or_else(|| format!("shell_{}", uuid::Uuid::new_v4()))
+        });
+
         let working_dir = if let Some(ref dir) = args.working_dir {
             let raw_path = Path::new(dir);
             let resolved = if raw_path.is_absolute() {
@@ -355,7 +404,6 @@ impl Tool for ShellTool {
             return run_batch(cmd, timeout).await;
         }
 
-        let call_id = format!("shell_{}", uuid::Uuid::new_v4());
         run_streaming(
             cmd,
             timeout,
@@ -363,7 +411,7 @@ impl Tool for ShellTool {
             &self.process_id,
             &self.channel_id,
             &self.agent_id,
-            call_id,
+            streaming_call_id.expect("streaming call_id must exist when streaming is enabled"),
         )
         .await
     }
@@ -437,6 +485,7 @@ async fn run_streaming(
         .as_millis() as u64;
     let last_output_ms = Arc::new(AtomicU64::new(start_ms));
     let interactive_detected = Arc::new(AtomicBool::new(false));
+    let prompt_hint_detected = Arc::new(AtomicBool::new(false));
 
     // Wrap child in Arc<Mutex<>> so the watchdog can kill it
     let child_arc = Arc::new(tokio::sync::Mutex::new(child));
@@ -444,6 +493,7 @@ async fn run_streaming(
     let watchdog = spawn_quiesce_watchdog(
         Arc::clone(&last_output_ms),
         Arc::clone(&interactive_detected),
+        Arc::clone(&prompt_hint_detected),
         Arc::clone(&child_arc),
     );
 
@@ -459,6 +509,7 @@ async fn run_streaming(
         stream_name: "stdout".to_string(),
         last_output_ms: Arc::clone(&last_output_ms),
         interactive_detected: Arc::clone(&interactive_detected),
+        prompt_hint_detected: Arc::clone(&prompt_hint_detected),
     };
 
     let stderr_ctx = StreamContext {
@@ -470,6 +521,7 @@ async fn run_streaming(
         stream_name: "stderr".to_string(),
         last_output_ms: Arc::clone(&last_output_ms),
         interactive_detected: Arc::clone(&interactive_detected),
+        prompt_hint_detected: Arc::clone(&prompt_hint_detected),
     };
 
     // Run streaming with overall timeout

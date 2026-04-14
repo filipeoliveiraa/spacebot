@@ -200,13 +200,18 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			const callId = event.call_id || `${event.process_id}:${event.tool_name}:started`;
 			setLiveTranscripts((prev) => {
 				const steps = prev[event.process_id] ?? [];
-				const pendingResultIndex = steps.findIndex(
-					(step) =>
-						step.type === "tool_result" &&
-						step.name === event.tool_name &&
-						(step as TranscriptStep).status === "pending" &&
-						step.text === "",
+				const pendingResultIndexByCallId = steps.findIndex(
+					(step) => step.type === "tool_result" && step.call_id === callId,
 				);
+				const pendingResultIndex = pendingResultIndexByCallId >= 0
+					? pendingResultIndexByCallId
+					: steps.findIndex(
+						(step) =>
+							step.type === "tool_result" &&
+							step.name === event.tool_name &&
+							(step as TranscriptStep).status === "pending" &&
+							step.text === "",
+					);
 				const pendingResult = pendingResultIndex >= 0 ? steps[pendingResultIndex] : null;
 				const nextSteps = pendingResult
 					? steps.filter((_, index) => index !== pendingResultIndex)

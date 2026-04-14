@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, broadcast, mpsc};
 
-type LiveToolCallIds = Arc<RwLock<HashMap<String, HashMap<String, Vec<String>>>>>;
+const MAX_LIVE_TOOL_OUTPUT_BYTES: usize = 50_000;
 
 fn worker_tool_result_status(result: &str) -> ToolResultStatus {
     if result.contains("\"waiting_for_input\":true")
@@ -43,12 +43,18 @@ fn worker_tool_result_status(result: &str) -> ToolResultStatus {
 }
 
 fn append_live_output(output: &mut Option<String>, line: &str) {
-    if let Some(existing) = output {
-        existing.push_str(line);
-        existing.push('\n');
-    } else {
-        *output = Some(format!("{line}\n"));
+    let mut combined = output.take().unwrap_or_default();
+    combined.push_str(line);
+    combined.push('\n');
+
+    if combined.len() > MAX_LIVE_TOOL_OUTPUT_BYTES {
+        let mut start = combined.len().saturating_sub(MAX_LIVE_TOOL_OUTPUT_BYTES);
+        while start < combined.len() && !combined.is_char_boundary(start) {
+            start += 1;
+        }
+        combined.drain(..start);
     }
+    *output = Some(combined);
 }
 
 fn upsert_pending_tool_output(
@@ -91,20 +97,32 @@ fn push_live_tool_call(
     tool_name: String,
     args: String,
 ) {
-    let pending_output = steps
+    let pending_output_index = steps
         .iter()
         .position(|step| {
             matches!(
                 step,
                 TranscriptStep::ToolResult {
-                    name,
-                    text,
-                    status: ToolResultStatus::Pending,
+                    call_id: existing_call_id,
                     ..
-                } if name == &tool_name && text.is_empty()
+                } if existing_call_id == &call_id
             )
         })
-        .map(|index| steps.remove(index));
+        .or_else(|| {
+            steps.iter().position(|step| {
+                matches!(
+                    step,
+                    TranscriptStep::ToolResult {
+                        name,
+                        text,
+                        status: ToolResultStatus::Pending,
+                        ..
+                    } if name == &tool_name && text.is_empty()
+                )
+            })
+        });
+
+    let pending_output = pending_output_index.map(|index| steps.remove(index));
 
     steps.push(TranscriptStep::Action {
         content: vec![ActionContent::ToolCall {
@@ -283,12 +301,6 @@ pub struct ApiState {
     /// recover the transcript without waiting for the worker to complete.
     /// Keyed by worker_id, cleared on worker completion.
     pub live_worker_transcripts: Arc<RwLock<HashMap<String, Vec<TranscriptStep>>>>,
-    /// Active worker tool call IDs keyed by worker_id then tool name.
-    ///
-    /// Event and tool-output buses can be received out of order, so this gives
-    /// the tool-output forwarder the lifecycle call_id whenever the ToolStarted
-    /// event has already arrived.
-    pub live_worker_tool_call_ids: LiveToolCallIds,
     /// In-memory cache of tool calls for running channel turns (direct mode).
     /// Keyed by channel_id, drained when the bot message is persisted.
     pub live_channel_tool_calls: Arc<RwLock<HashMap<String, Vec<ChannelToolCallEntry>>>>,
@@ -526,7 +538,6 @@ impl ApiState {
             agent_groups: ArcSwap::from_pointee(Vec::new()),
             agent_humans: ArcSwap::from_pointee(Vec::new()),
             live_worker_transcripts: Arc::new(RwLock::new(HashMap::new())),
-            live_worker_tool_call_ids: Arc::new(RwLock::new(HashMap::new())),
             live_channel_tool_calls: Arc::new(RwLock::new(HashMap::new())),
             ssh_mutex: tokio::sync::Mutex::new(()),
         }
@@ -578,7 +589,6 @@ impl ApiState {
     ) {
         let api_tx = self.event_tx.clone();
         let live_transcripts = self.live_worker_transcripts.clone();
-        let live_tool_call_ids = self.live_worker_tool_call_ids.clone();
         let live_channel_tools = self.live_channel_tool_calls.clone();
         // Snapshot the notification store at registration time. It is set once
         // at startup before any agents register, so the snapshot is always valid.
@@ -601,10 +611,6 @@ impl ApiState {
                                     .write()
                                     .await
                                     .insert(worker_id.to_string(), Vec::new());
-                                live_tool_call_ids
-                                    .write()
-                                    .await
-                                    .insert(worker_id.to_string(), HashMap::new());
                                 api_tx
                                     .send(ApiEvent::WorkerStarted {
                                         agent_id: agent_id.clone(),
@@ -667,10 +673,6 @@ impl ApiState {
                                 ..
                             } => {
                                 live_transcripts
-                                    .write()
-                                    .await
-                                    .remove(&worker_id.to_string());
-                                live_tool_call_ids
                                     .write()
                                     .await
                                     .remove(&worker_id.to_string());
@@ -754,14 +756,6 @@ impl ApiState {
                                 // Accumulate tool call into live transcript for workers.
                                 if let ProcessId::Worker(worker_id) = process_id {
                                     let worker_key = worker_id.to_string();
-                                    live_tool_call_ids
-                                        .write()
-                                        .await
-                                        .entry(worker_key.clone())
-                                        .or_default()
-                                        .entry(tool_name.clone())
-                                        .or_default()
-                                        .push(call_id.clone());
                                     let mut guard = live_transcripts.write().await;
                                     let steps = guard.entry(worker_key).or_default();
                                     push_live_tool_call(
@@ -814,22 +808,6 @@ impl ApiState {
                                 // Accumulate tool result into live transcript for workers.
                                 if let ProcessId::Worker(worker_id) = process_id {
                                     let worker_key = worker_id.to_string();
-                                    {
-                                        let mut guard = live_tool_call_ids.write().await;
-                                        if let Some(by_tool) = guard.get_mut(&worker_key) {
-                                            if let Some(queue) = by_tool.get_mut(tool_name) {
-                                                queue.retain(|existing_call_id| {
-                                                    existing_call_id != call_id
-                                                });
-                                                if queue.is_empty() {
-                                                    by_tool.remove(tool_name);
-                                                }
-                                            }
-                                            if by_tool.is_empty() {
-                                                guard.remove(&worker_key);
-                                            }
-                                        }
-                                    }
                                     let mut guard = live_transcripts.write().await;
                                     let steps = guard.entry(worker_key).or_default();
                                     upsert_final_tool_result(
@@ -1014,7 +992,6 @@ impl ApiState {
     ) {
         let api_tx = self.event_tx.clone();
         let live_transcripts = self.live_worker_transcripts.clone();
-        let live_tool_call_ids = self.live_worker_tool_call_ids.clone();
         tokio::spawn(async move {
             loop {
                 match tool_output_rx.recv().await {
@@ -1031,23 +1008,12 @@ impl ApiState {
                         {
                             let (process_type, id_str) = process_id_info(process_id);
                             // Accumulate streaming output into live transcript for workers.
-                            let mut event_call_id = call_id.clone();
                             if let ProcessId::Worker(worker_id) = process_id {
-                                if let Some(active_call_id) = live_tool_call_ids
-                                    .read()
-                                    .await
-                                    .get(&worker_id.to_string())
-                                    .and_then(|by_tool| by_tool.get(tool_name))
-                                    .and_then(|queue| queue.first())
-                                    .cloned()
-                                {
-                                    event_call_id = active_call_id;
-                                }
                                 let mut guard = live_transcripts.write().await;
                                 let steps = guard.entry(worker_id.to_string()).or_default();
                                 upsert_pending_tool_output(
                                     steps,
-                                    event_call_id.clone(),
+                                    call_id.clone(),
                                     tool_name.clone(),
                                     line,
                                 );
@@ -1058,7 +1024,7 @@ impl ApiState {
                                     channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                     process_type,
                                     process_id: id_str,
-                                    call_id: event_call_id,
+                                    call_id: call_id.clone(),
                                     tool_name: tool_name.clone(),
                                     line: line.clone(),
                                     stream: stream.clone(),
@@ -1294,5 +1260,27 @@ fn process_id_info(id: &ProcessId) -> (String, String) {
         ProcessId::Channel(channel_id) => ("channel".into(), channel_id.to_string()),
         ProcessId::Branch(branch_id) => ("branch".into(), branch_id.to_string()),
         ProcessId::Worker(worker_id) => ("worker".into(), worker_id.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_LIVE_TOOL_OUTPUT_BYTES, append_live_output};
+
+    #[test]
+    fn append_live_output_caps_buffer_bytes() {
+        let mut output = Some("a".repeat(MAX_LIVE_TOOL_OUTPUT_BYTES - 1));
+        append_live_output(&mut output, "bc");
+        let capped = output.expect("output should be present");
+        assert!(capped.len() <= MAX_LIVE_TOOL_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn append_live_output_preserves_utf8_boundaries_when_capping() {
+        let mut output = Some("🙂".repeat((MAX_LIVE_TOOL_OUTPUT_BYTES / 4) + 4));
+        append_live_output(&mut output, "🙂");
+        let capped = output.expect("output should be present");
+        assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
+        assert!(capped.len() <= MAX_LIVE_TOOL_OUTPUT_BYTES);
     }
 }
