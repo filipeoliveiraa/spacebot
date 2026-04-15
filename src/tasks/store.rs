@@ -161,6 +161,19 @@ pub struct UpdateTaskInput {
     pub assigned_agent_id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TaskUpdateResult {
+    pub previous_status: TaskStatus,
+    pub task: Task,
+}
+
+#[derive(Debug, Clone)]
+pub enum WorkerTaskUpdateResult {
+    Updated(Box<TaskUpdateResult>),
+    NotAssigned,
+    WrongTask { assigned_task_number: i64 },
+}
+
 /// Filters for listing tasks from the global store.
 #[derive(Debug, Clone, Default)]
 pub struct TaskListFilter {
@@ -357,10 +370,111 @@ impl TaskStore {
     }
 
     pub async fn update(&self, task_number: i64, input: UpdateTaskInput) -> Result<Option<Task>> {
-        let Some(current) = self.get_by_number(task_number).await? else {
+        Ok(self
+            .update_with_status_transition(task_number, input)
+            .await?
+            .map(|result| result.task))
+    }
+
+    pub async fn update_with_status_transition(
+        &self,
+        task_number: i64,
+        input: UpdateTaskInput,
+    ) -> Result<Option<TaskUpdateResult>> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open task update transaction")?;
+
+        let row = sqlx::query(&format!(
+            "{SELECT_COLUMNS} FROM tasks WHERE task_number = ?"
+        ))
+        .bind(task_number)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to fetch task by number for update")?;
+
+        let Some(row) = row else {
+            tx.commit()
+                .await
+                .context("failed to commit empty task update transaction")?;
             return Ok(None);
         };
 
+        let current = task_from_row(row)?;
+        let previous_status = current.status;
+        let task = Self::update_current_in_tx(&mut tx, task_number, current, input).await?;
+
+        tx.commit()
+            .await
+            .context("failed to commit task update transaction")?;
+
+        Ok(Some(TaskUpdateResult {
+            previous_status,
+            task,
+        }))
+    }
+
+    pub async fn update_worker_task(
+        &self,
+        worker_id: &str,
+        task_number: i64,
+        input: UpdateTaskInput,
+    ) -> Result<WorkerTaskUpdateResult> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .context("failed to open worker task update transaction")?;
+
+        let row = sqlx::query(&format!(
+            "{SELECT_COLUMNS} FROM tasks WHERE worker_id = ? ORDER BY updated_at DESC LIMIT 1"
+        ))
+        .bind(worker_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to fetch task by worker id for update")?;
+
+        let Some(row) = row else {
+            tx.commit()
+                .await
+                .context("failed to commit empty worker task update transaction")?;
+            return Ok(WorkerTaskUpdateResult::NotAssigned);
+        };
+
+        let current = task_from_row(row)?;
+        if current.task_number != task_number {
+            let assigned_task_number = current.task_number;
+            tx.commit()
+                .await
+                .context("failed to commit rejected worker task update transaction")?;
+            return Ok(WorkerTaskUpdateResult::WrongTask {
+                assigned_task_number,
+            });
+        }
+
+        let previous_status = current.status;
+        let task = Self::update_current_in_tx(&mut tx, task_number, current, input).await?;
+
+        tx.commit()
+            .await
+            .context("failed to commit worker task update transaction")?;
+
+        Ok(WorkerTaskUpdateResult::Updated(Box::new(
+            TaskUpdateResult {
+                previous_status,
+                task,
+            },
+        )))
+    }
+
+    async fn update_current_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        task_number: i64,
+        current: Task,
+        input: UpdateTaskInput,
+    ) -> Result<Task> {
         if let Some(next_status) = input.status
             && !can_transition(current.status, next_status)
         {
@@ -455,11 +569,19 @@ impl TaskStore {
 
         sql.bind(input.approved_by)
             .bind(task_number)
-            .execute(&self.pool)
+            .execute(&mut **tx)
             .await
             .context("failed to update task")?;
 
-        self.get_by_number(task_number).await
+        let updated = sqlx::query(&format!(
+            "{SELECT_COLUMNS} FROM tasks WHERE task_number = ?"
+        ))
+        .bind(task_number)
+        .fetch_one(&mut **tx)
+        .await
+        .context("failed to fetch updated task")?;
+
+        task_from_row(updated)
     }
 
     pub async fn delete(&self, task_number: i64) -> Result<bool> {
@@ -777,6 +899,33 @@ mod tests {
             .expect_err("pending_approval -> in_progress must fail");
 
         assert!(error.to_string().contains("invalid task status transition"));
+    }
+
+    #[tokio::test]
+    async fn update_with_status_transition_returns_previous_status() {
+        let store = setup_store().await;
+        let created = store
+            .create(self_assigned_input(
+                "track status transition",
+                TaskStatus::InProgress,
+            ))
+            .await
+            .expect("task should be created");
+
+        let result = store
+            .update_with_status_transition(
+                created.task_number,
+                UpdateTaskInput {
+                    status: Some(TaskStatus::Done),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update should succeed")
+            .expect("task should exist");
+
+        assert_eq!(result.previous_status, TaskStatus::InProgress);
+        assert_eq!(result.task.status, TaskStatus::Done);
     }
 
     #[tokio::test]

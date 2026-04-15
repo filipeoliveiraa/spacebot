@@ -884,14 +884,16 @@ async fn get_topic_hints(
     let placeholders: Vec<&str> = (0..channel_ids.len()).map(|_| "?").collect();
     let in_clause = placeholders.join(", ");
 
-    // We need the most recent BranchCompleted per channel. Use a window
-    // function approach that works in a single pass.
+    // Semantic branch conclusions are stored by event type, so keep topic hints
+    // scoped to summaries emitted from branches.
     let query = format!(
         "SELECT channel_id, summary FROM ( \
             SELECT channel_id, summary, \
                    ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY timestamp DESC, id DESC) AS rn \
             FROM working_memory_events \
-            WHERE event_type = 'branch_completed' \
+            WHERE (event_type = 'branch_completed' \
+                   OR (event_type IN ('outcome', 'blocked_on', 'constraint', 'deadline_set') \
+                       AND summary LIKE 'Branch %')) \
               AND channel_id IN ({in_clause}) \
         ) WHERE rn = 1"
     );
@@ -1261,6 +1263,54 @@ mod tests {
             error
                 .to_string()
                 .contains("unknown working memory event_type 'unknown_type' for event wm_unknown")
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_hints_include_branch_semantic_terminal_events() {
+        let store = setup_test_store().await;
+        let today = store.today();
+        let base = Utc::now();
+
+        insert_event(
+            &store.pool,
+            &WorkingMemoryEvent {
+                id: Uuid::new_v4().to_string(),
+                event_type: WorkingMemoryEventType::Outcome,
+                timestamp: base,
+                channel_id: Some("chan-1".to_string()),
+                user_id: None,
+                summary: "Branch outcome: selected the task-store transaction fix".to_string(),
+                detail: None,
+                importance: 0.7,
+                day: today.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        insert_event(
+            &store.pool,
+            &WorkingMemoryEvent {
+                id: Uuid::new_v4().to_string(),
+                event_type: WorkingMemoryEventType::Outcome,
+                timestamp: base + chrono::Duration::minutes(1),
+                channel_id: Some("chan-1".to_string()),
+                user_id: None,
+                summary: "Task #12 completed".to_string(),
+                detail: None,
+                importance: 0.7,
+                day: today,
+            },
+        )
+        .await
+        .unwrap();
+
+        let channel_ids = vec!["chan-1".to_string()];
+        let hints = get_topic_hints(&store.pool, &channel_ids).await.unwrap();
+
+        assert_eq!(
+            hints.get("chan-1").map(String::as_str),
+            Some("Branch outcome: selected the task-store transaction fix")
         );
     }
 

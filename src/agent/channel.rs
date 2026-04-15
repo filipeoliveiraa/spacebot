@@ -97,6 +97,7 @@ const CHANGE_COMPARISON_VERBS: &[&str] = &[
     "go with ",
     "proceed with ",
 ];
+const BRANCH_CANCELLED_PREFIX: &str = "Branch cancelled:";
 
 async fn recv_channel_event(
     event_rx: &mut broadcast::Receiver<ProcessEvent>,
@@ -181,6 +182,39 @@ fn format_conversational_event_summary(
     } else {
         format!("{source} {label}: {event_summary}")
     }
+}
+
+fn truncate_working_memory_summary(summary: &str) -> String {
+    if summary.len() > 200 {
+        let boundary = summary.floor_char_boundary(200);
+        format!("{}...", &summary[..boundary])
+    } else {
+        summary.to_string()
+    }
+}
+
+fn branch_working_memory_event_summary(
+    conclusion: &str,
+) -> (crate::memory::WorkingMemoryEventType, String) {
+    if let Some(reason) = conclusion.strip_prefix(BRANCH_CANCELLED_PREFIX) {
+        let reason = truncate_working_memory_summary(reason.trim());
+        let summary = if reason.is_empty() {
+            "Branch cancelled".to_string()
+        } else {
+            format!("Branch cancelled: {reason}")
+        };
+        return (crate::memory::WorkingMemoryEventType::Error, summary);
+    }
+
+    let summary = truncate_working_memory_summary(conclusion);
+    let (event_type, event_summary) = classify_conversational_event_summary(
+        &summary,
+        crate::memory::WorkingMemoryEventType::BranchCompleted,
+    );
+    (
+        event_type,
+        format_conversational_event_summary(event_type, "Branch", &event_summary),
+    )
 }
 
 fn sentence_contains_decision_marker(sentence: &str) -> bool {
@@ -3265,7 +3299,7 @@ impl Channel {
                     // Regular branch: accumulate result for the next retrigger.
                     // The result text will be embedded directly in the retrigger
                     // message so the LLM knows exactly which process produced it.
-                    let branch_success = !conclusion.starts_with("Branch cancelled:");
+                    let branch_success = !conclusion.starts_with(BRANCH_CANCELLED_PREFIX);
                     self.pending_results.push(PendingResult {
                         process_type: "branch",
                         process_id: branch_id.to_string(),
@@ -3281,27 +3315,11 @@ impl Channel {
                         );
                     }
 
-                    // Truncate for working memory — full conclusion lives in branch_runs.
-                    let summary = if conclusion.len() > 200 {
-                        let boundary = conclusion.floor_char_boundary(200);
-                        format!("{}...", &conclusion[..boundary])
-                    } else {
-                        conclusion.clone()
-                    };
-                    let (event_type, event_summary) = classify_conversational_event_summary(
-                        &summary,
-                        crate::memory::WorkingMemoryEventType::BranchCompleted,
-                    );
+                    let (event_type, event_summary) =
+                        branch_working_memory_event_summary(conclusion);
                     self.deps
                         .working_memory
-                        .emit(
-                            event_type,
-                            format_conversational_event_summary(
-                                event_type,
-                                "Branch",
-                                &event_summary,
-                            ),
-                        )
+                        .emit(event_type, event_summary)
                         .channel(self.id.to_string())
                         .importance(0.7)
                         .record();
@@ -3960,11 +3978,11 @@ fn is_dm_conversation_id(conv_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObserveModeFallbackState, classify_conversational_event_summary,
-        compute_listen_mode_invocation, decision_user_id, extract_decision_summary_from_reply,
-        format_conversational_event_summary, is_dm_conversation_id, recv_channel_event,
-        should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
-        should_send_quiet_mode_fallback,
+        ObserveModeFallbackState, branch_working_memory_event_summary,
+        classify_conversational_event_summary, compute_listen_mode_invocation, decision_user_id,
+        extract_decision_summary_from_reply, format_conversational_event_summary,
+        is_dm_conversation_id, recv_channel_event, should_process_event_for_channel,
+        should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
     };
     use crate::memory::{MemoryType, WorkingMemoryEventType};
     use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
@@ -4297,6 +4315,15 @@ mod tests {
             format_conversational_event_summary(event_type, "Branch", &summary),
             "Branch deadline set: ship by 2026-04-20"
         );
+    }
+
+    #[test]
+    fn branch_working_memory_event_records_cancellation_as_error() {
+        let (event_type, summary) =
+            branch_working_memory_event_summary("Branch cancelled: superseded by user request");
+
+        assert_eq!(event_type, WorkingMemoryEventType::Error);
+        assert_eq!(summary, "Branch cancelled: superseded by user request");
     }
 
     #[test]

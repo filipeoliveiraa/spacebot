@@ -1,6 +1,8 @@
 //! Task update tool for branch and worker processes.
 
-use crate::tasks::{TaskPriority, TaskStatus, TaskStore, TaskSubtask, UpdateTaskInput};
+use crate::tasks::{
+    TaskPriority, TaskStatus, TaskStore, TaskSubtask, UpdateTaskInput, WorkerTaskUpdateResult,
+};
 use crate::{AgentId, WorkerId};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -155,52 +157,18 @@ impl Tool for TaskUpdateTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task_number = i64::from(args.task_number);
-        let previous_status = match &self.scope {
-            TaskUpdateScope::Branch => {
-                self.task_store
-                    .get_by_number(task_number)
-                    .await
-                    .map_err(|error| TaskUpdateError(format!("{error}")))?
-                    .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?
-                    .status
-            }
-            TaskUpdateScope::Worker(worker_id) => {
-                let current = self
-                    .task_store
-                    .get_by_worker_id(&worker_id.to_string())
-                    .await
-                    .map_err(|error| TaskUpdateError(format!("{error}")))?;
-
-                let Some(task) = current else {
-                    return Err(TaskUpdateError(
-                        "worker is not assigned to a task".to_string(),
-                    ));
-                };
-
-                if task.task_number != task_number {
-                    return Err(TaskUpdateError(format!(
-                        "worker {} can only update task #{}",
-                        worker_id, task.task_number
-                    )));
-                }
-
-                // Workers can only update subtasks and metadata — not status, priority,
-                // title, description, worker binding, or approval.
-                if args.title.is_some()
-                    || args.description.is_some()
-                    || args.status.is_some()
-                    || args.priority.is_some()
-                    || args.worker_id.is_some()
-                    || args.approved_by.is_some()
-                {
-                    return Err(TaskUpdateError(
-                        "workers can only update subtasks and metadata".to_string(),
-                    ));
-                }
-
-                task.status
-            }
-        };
+        if matches!(self.scope, TaskUpdateScope::Worker(_))
+            && (args.title.is_some()
+                || args.description.is_some()
+                || args.status.is_some()
+                || args.priority.is_some()
+                || args.worker_id.is_some()
+                || args.approved_by.is_some())
+        {
+            return Err(TaskUpdateError(
+                "workers can only update subtasks and metadata".to_string(),
+            ));
+        }
 
         let status = match args.status.as_deref() {
             None => None,
@@ -224,27 +192,51 @@ impl Tool for TaskUpdateTool {
             ),
         };
 
-        let updated = self
-            .task_store
-            .update(
-                task_number,
-                UpdateTaskInput {
-                    title: args.title,
-                    description: args.description,
-                    status,
-                    priority,
-                    subtasks: args.subtasks,
-                    metadata: args.metadata,
-                    worker_id: args.worker_id,
-                    clear_worker_id: false,
-                    approved_by: args.approved_by,
-                    complete_subtask,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|error| TaskUpdateError(format!("{error}")))?
-            .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?;
+        let input = UpdateTaskInput {
+            title: args.title,
+            description: args.description,
+            status,
+            priority,
+            subtasks: args.subtasks,
+            metadata: args.metadata,
+            worker_id: args.worker_id,
+            clear_worker_id: false,
+            approved_by: args.approved_by,
+            complete_subtask,
+            ..Default::default()
+        };
+
+        let update_result = match &self.scope {
+            TaskUpdateScope::Branch => self
+                .task_store
+                .update_with_status_transition(task_number, input)
+                .await
+                .map_err(|error| TaskUpdateError(format!("{error}")))?
+                .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?,
+            TaskUpdateScope::Worker(worker_id) => match self
+                .task_store
+                .update_worker_task(&worker_id.to_string(), task_number, input)
+                .await
+                .map_err(|error| TaskUpdateError(format!("{error}")))?
+            {
+                WorkerTaskUpdateResult::Updated(result) => *result,
+                WorkerTaskUpdateResult::NotAssigned => {
+                    return Err(TaskUpdateError(
+                        "worker is not assigned to a task".to_string(),
+                    ));
+                }
+                WorkerTaskUpdateResult::WrongTask {
+                    assigned_task_number,
+                } => {
+                    return Err(TaskUpdateError(format!(
+                        "worker {} can only update task #{}",
+                        worker_id, assigned_task_number
+                    )));
+                }
+            },
+        };
+        let previous_status = update_result.previous_status;
+        let updated = update_result.task;
 
         if let Some(working_memory) = &self.working_memory {
             let transitioned_to_done =
