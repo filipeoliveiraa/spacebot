@@ -25,7 +25,7 @@ Spacebot supports the *shape* of this today (multi-agent first-class, per-agent 
 | 2. **Dormant cortex mode** | Today every agent's cortex ticks on `tick_interval_secs`. With thousands of mostly-idle agents this is wasted bulletin generation that's also stale by the time it's used. | [§2](#2-dormant-cortex-mode) |
 | 3. **Wall-clock worker timeout** | Today workers have segment cap (15 × 10 = 150 turns) but no wall-clock bound. A stuck browser session can drift indefinitely. | [§3](#3-wall-clock-worker-timeout) |
 | 4. **Browser captcha / blocked detection** | Today `tools/browser.rs` has SSRF protection only. Captcha and fraud-detect manifest as opaque retry-loops or generic errors instead of structured "blocked: needs human" outcomes. | [§4](#4-browser-captcha--blocked-detection) |
-| 5. **Per-agent cron defaults** | Today cron timeout is 120s with optional per-job override. Agent-class defaults (e.g. research-heavy agents need 30min default) need to be agent-level, not per-job. | [§5](#5-per-agent-cron-defaults) |
+| 5. **Per-agent cron defaults** | Today cron timeout is 1500s with optional per-job override. Agent-class defaults (e.g. research-heavy agents need 30min default) need to be agent-level, not per-job. | [§5](#5-per-agent-cron-defaults) |
 
 These are independent changes that can ship in any order. Together they form a deployment-readiness milestone for the agentic-backend use case.
 

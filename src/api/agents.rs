@@ -428,11 +428,18 @@ pub(super) async fn wake_agent(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
     let target: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
-    crate::agent::wake::fire_wake(tx, &target);
+    if !state.wake_registry.read().await.contains_key(&target) {
+        tracing::warn!(%agent_id, "wake requested for unregistered agent");
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if let Err(error) = tx.send(target) {
+        tracing::warn!(%agent_id, %error, "wake send failed — manager not receiving");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     Ok(Json(WakeAgentResponse {
         agent_id,
         fired: true,
-        message: "wake delivered".to_string(),
+        message: "wake queued".to_string(),
     }))
 }
 
@@ -1354,13 +1361,6 @@ pub(super) async fn delete_agent(
         }
     }
 
-    // Drop the wake-manager registration so wakes addressed to this agent
-    // are silently dropped instead of dispatching to a torn-down deps.
-    {
-        let key: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
-        state.wake_registry.write().await.remove(&key);
-    }
-
     // Remove the [[agents]] entry from config.toml
     let config_path = state.config_path.read().await.clone();
     if config_path.exists() {
@@ -1403,6 +1403,14 @@ pub(super) async fn delete_agent(
                 tracing::warn!(%error, "failed to write config.toml");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
+    }
+
+    // Drop the wake-manager registration only after the fallible config write
+    // succeeds. Removing it earlier would leave the agent alive but unwakeable
+    // if the write failed mid-flight.
+    {
+        let key: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
+        state.wake_registry.write().await.remove(&key);
     }
 
     // Close the SQLite pool before removing state

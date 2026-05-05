@@ -1185,8 +1185,16 @@ where
             url,
             mut evidence,
         } => {
+            // Scrub URL too — query params and path segments routinely
+            // carry bearer tokens / session ids. The blocked URL flows
+            // into WorkerComplete.result and channel logs, so an
+            // un-scrubbed URL is a credential-leak path.
+            let url = url.map(|u| scrub(u));
             if let Some(snippet) = evidence.html_snippet.take() {
                 evidence.html_snippet = Some(scrub(snippet));
+            }
+            if let Some(final_url) = evidence.final_url.take() {
+                evidence.final_url = Some(scrub(final_url));
             }
             WorkerOutcome::Blocked {
                 reason,
