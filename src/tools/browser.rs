@@ -794,6 +794,10 @@ pub(crate) struct BrowserContext {
     /// the `secret` parameter can look up credential values without exposing
     /// them in tool arguments or output.
     secrets: Option<Arc<SecretsStore>>,
+    /// Worker-shared slot for surfacing a captcha / login wall / WAF block.
+    /// `None` for channel-level tool invocations (no worker outcome to short-
+    /// circuit).
+    blocked_signal: Option<crate::agent::worker::BlockSignal>,
 }
 
 impl BrowserContext {
@@ -808,7 +812,41 @@ impl BrowserContext {
             config,
             screenshot_dir,
             secrets,
+            blocked_signal: None,
         }
+    }
+
+    /// Attach a worker-shared block signal slot. When the browser detects an
+    /// external defense, it writes the structured reason + evidence into the
+    /// slot and the worker short-circuits to `WorkerOutcome::Blocked` at the
+    /// next loop iteration.
+    pub(crate) fn with_block_signal(mut self, signal: crate::agent::worker::BlockSignal) -> Self {
+        self.blocked_signal = Some(signal);
+        self
+    }
+
+    /// Mark a positive block detection. No-op when no signal is wired.
+    /// First-write-wins — if the slot already holds a detection, the new
+    /// data is dropped (the worker has not yet read the prior detection,
+    /// short-circuit will pick it up first).
+    pub(crate) fn signal_block(
+        &self,
+        reason: crate::agent::worker::BlockReason,
+        url: Option<String>,
+        evidence: crate::agent::worker::BlockEvidence,
+    ) {
+        let Some(signal) = self.blocked_signal.as_ref() else {
+            return;
+        };
+        let Ok(mut slot) = signal.lock() else { return };
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(crate::agent::worker::BlockSignalData {
+            reason,
+            url,
+            evidence,
+        });
     }
 
     /// Get the active page or return an error. Does NOT hold the lock — caller
@@ -1357,7 +1395,21 @@ impl Tool for BrowserNavigateTool {
 
         let title = page.get_title().await.ok().flatten();
         let current_url = page.url().await.ok().flatten();
+        let detection = run_block_detection(page, current_url.as_deref(), Some(&args.url)).await;
+
         state.invalidate_snapshot();
+
+        if let Some(detection) = detection {
+            self.context.signal_block(
+                detection.reason.clone(),
+                current_url.clone(),
+                detection.evidence,
+            );
+            return Err(BrowserError::new(format!(
+                "navigation blocked: {} — surfaced to caller; agent will short-circuit",
+                detection.reason.describe()
+            )));
+        }
 
         Ok(BrowserOutput::success(format!("Navigated to {}", args.url))
             .with_page_info(title, current_url))
@@ -1517,7 +1569,22 @@ impl Tool for BrowserClickTool {
         let page = self.context.require_active_page(&state)?;
         wait_for_page_ready(page).await;
 
+        let current_url = page.url().await.ok().flatten();
+        let detection = run_block_detection(page, current_url.as_deref(), None).await;
+
         state.invalidate_snapshot();
+
+        if let Some(detection) = detection {
+            self.context.signal_block(
+                detection.reason.clone(),
+                current_url.clone(),
+                detection.evidence,
+            );
+            return Err(BrowserError::new(format!(
+                "click triggered blocked page: {} — surfaced to caller; agent will short-circuit",
+                detection.reason.describe()
+            )));
+        }
 
         Ok(BrowserOutput::success(format!(
             "Clicked element at {label}"
@@ -2145,6 +2212,7 @@ pub fn register_browser_tools(
     config: BrowserConfig,
     screenshot_dir: PathBuf,
     runtime_config: &crate::config::RuntimeConfig,
+    blocked_signal: Option<crate::agent::worker::BlockSignal>,
 ) -> rig::tool::server::ToolServer {
     let state = if let Some(shared) = runtime_config
         .shared_browser
@@ -2158,7 +2226,10 @@ pub fn register_browser_tools(
 
     let secrets = runtime_config.secrets.load().as_ref().as_ref().cloned();
 
-    let context = BrowserContext::new(state, config, screenshot_dir, secrets);
+    let mut context = BrowserContext::new(state, config, screenshot_dir, secrets);
+    if let Some(signal) = blocked_signal {
+        context = context.with_block_signal(signal);
+    }
 
     server
         .tool(BrowserLaunchTool {
@@ -2198,6 +2269,23 @@ pub fn register_browser_tools(
 }
 
 // Shared helpers
+
+/// Run captcha / login wall / WAF detection against the current page state.
+/// Returns `Some(Detection)` on positive match. Reads page HTML via CDP and
+/// passes it to the pure detection module. Detection failures (e.g. CDP
+/// errors) are silently treated as "no detection" — never block a navigation
+/// because we couldn't read its HTML.
+async fn run_block_detection(
+    page: &chromiumoxide::Page,
+    final_url: Option<&str>,
+    requested_url: Option<&str>,
+) -> Option<crate::tools::browser_detection::Detection> {
+    let html = page.content().await.ok()?;
+    let target_host = requested_url
+        .and_then(|u| url::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(String::from));
+    crate::tools::browser_detection::classify(&html, final_url, target_host.as_deref())
+}
 
 /// Get the active page, or create a first one if the browser has no pages yet.
 async fn get_or_create_page<'a>(

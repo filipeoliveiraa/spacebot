@@ -50,13 +50,89 @@ const MAX_SEGMENTS: usize = 10;
 /// Default wall-clock budget for a worker run when no agent override is set.
 pub const DEFAULT_WORKER_WALL_CLOCK_TIMEOUT_SECS: u64 = 1800;
 
+/// Reason a worker run was blocked by an external defense (captcha, login
+/// wall, rate-limit, fraud-detect WAF). Detection only — the agent fails
+/// cleanly and surfaces to the parent app's escalation path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockReason {
+    /// Captcha challenge (recaptcha, hcaptcha, Cloudflare Turnstile, etc.).
+    Captcha { provider: String },
+    /// Page redirected to a login URL or returned 401/403 with auth-prompting
+    /// headers.
+    LoginWall,
+    /// HTTP 429 or equivalent rate-limit signal. `retry_after_secs` is set
+    /// when the response carried a `Retry-After` header.
+    RateLimit { retry_after_secs: Option<u64> },
+    /// WAF-style fraud / bot-protect block (Akamai, Cloudflare challenge,
+    /// AWS WAF, Imperva). `vendor` identifies the WAF where known.
+    FraudDetect { vendor: String },
+    /// Detector fired but couldn't classify into a specific category.
+    Unknown,
+}
+
+impl BlockReason {
+    pub fn kind_tag(&self) -> &'static str {
+        match self {
+            Self::Captcha { .. } => "captcha",
+            Self::LoginWall => "login_wall",
+            Self::RateLimit { .. } => "rate_limit",
+            Self::FraudDetect { .. } => "fraud_detect",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Captcha { provider } => format!("captcha ({provider})"),
+            Self::LoginWall => "login wall".to_string(),
+            Self::RateLimit { retry_after_secs } => match retry_after_secs {
+                Some(secs) => format!("rate limit (retry after {secs}s)"),
+                None => "rate limit".to_string(),
+            },
+            Self::FraudDetect { vendor } => format!("fraud detect ({vendor})"),
+            Self::Unknown => "unknown block".to_string(),
+        }
+    }
+}
+
+/// Captured artifacts at the moment a block was detected. Surfaced via
+/// `WorkerOutcome::Blocked` so the parent app's escalation path has enough
+/// to triage (and the agent can capture the dead-end into memory).
+#[derive(Debug, Clone, Default)]
+pub struct BlockEvidence {
+    /// Final URL the browser landed on at detection time.
+    pub final_url: Option<String>,
+    /// Snippet of page HTML (first ~4KB) for human triage.
+    pub html_snippet: Option<String>,
+    /// HTTP status code where available (server-side detected).
+    pub status: Option<u16>,
+}
+
+/// Shared mutable slot that browser tools write to on positive block
+/// detection. The worker reads it at each loop iteration and short-circuits
+/// to `WorkerOutcome::Blocked` when set. Mirrors the role of
+/// `SpacebotHook::outcome_signaled` for terminal completion intent.
+pub type BlockSignal = std::sync::Arc<std::sync::Mutex<Option<BlockSignalData>>>;
+
+#[derive(Debug, Clone)]
+pub struct BlockSignalData {
+    pub reason: BlockReason,
+    pub url: Option<String>,
+    pub evidence: BlockEvidence,
+}
+
+/// Construct a fresh empty block signal slot.
+pub fn new_block_signal() -> BlockSignal {
+    std::sync::Arc::new(std::sync::Mutex::new(None))
+}
+
 /// Structured outcome of a worker's `run()` call.
 ///
 /// Replaces the prior `Result<String>` return so callers can distinguish a
 /// clean success from a partial (max-segments) exit, a wall-clock timeout,
-/// a tool-driven block (captcha / login wall — phase 4), a cancellation, or
-/// a hard failure. All variants carry enough payload that the caller can
-/// emit a `ProcessEvent::WorkerComplete` without losing context.
+/// a tool-driven block (captcha / login wall), a cancellation, or a hard
+/// failure. All variants carry enough payload that the caller can emit a
+/// `ProcessEvent::WorkerComplete` without losing context.
 #[derive(Debug, Clone)]
 pub enum WorkerOutcome {
     /// Worker completed and produced a final assistant response.
@@ -72,6 +148,15 @@ pub enum WorkerOutcome {
     Timeout {
         elapsed_secs: u64,
         segments_run: usize,
+    },
+    /// Browser (or other tool) detected an external defense — captcha,
+    /// login wall, rate limit, WAF block. The worker exits cleanly so the
+    /// agent can capture the dead-end into memory and the parent app can
+    /// escalate to a human.
+    Blocked {
+        reason: BlockReason,
+        url: Option<String>,
+        evidence: Box<BlockEvidence>,
     },
     /// Worker failed for any other reason (LLM error, transient retries
     /// exhausted, context overflow exhausted, empty result without outcome).
@@ -96,6 +181,10 @@ impl WorkerOutcome {
             } => format!(
                 "Worker exceeded {elapsed_secs}s wall-clock timeout after {segments_run} segments."
             ),
+            Self::Blocked { reason, url, .. } => match url {
+                Some(url) => format!("Worker blocked: {} at {url}", reason.describe()),
+                None => format!("Worker blocked: {}", reason.describe()),
+            },
             Self::Failed { reason } => format!("Worker failed: {reason}"),
         }
     }
@@ -114,6 +203,7 @@ impl WorkerOutcome {
             Self::Partial { .. } => "partial",
             Self::Cancelled { .. } => "cancelled",
             Self::Timeout { .. } => "timeout",
+            Self::Blocked { .. } => "blocked",
             Self::Failed { .. } => "failed",
         }
     }
@@ -179,6 +269,11 @@ pub struct Worker {
     /// progress in `WorkerOutcome::Timeout` after the inner future is
     /// cancelled.
     pub segments_run: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Shared slot that browser tools (and any future block-aware tool)
+    /// write to on positive detection of an external defense. The worker
+    /// loop reads it at each iteration and short-circuits to
+    /// `WorkerOutcome::Blocked` when populated.
+    pub blocked_signal: BlockSignal,
 }
 
 impl Worker {
@@ -243,6 +338,7 @@ impl Worker {
                 model_override,
                 worker_wall_clock_timeout_secs,
                 segments_run: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                blocked_signal: new_block_signal(),
             },
             inject_tx,
         )
@@ -485,6 +581,7 @@ impl Worker {
             self.deps.memory_search.clone(),
             self.wiki_write,
             self.deps.wiki_store.clone(),
+            Some(self.blocked_signal.clone()),
         );
 
         let routing = self.deps.runtime_config.routing.load();
@@ -539,6 +636,33 @@ impl Worker {
             String::new()
         } else {
             loop {
+                // Short-circuit on a tool-detected block (captcha / login wall
+                // / WAF). Browser tools write to `blocked_signal` after their
+                // page action; the worker exits cleanly so the agent can
+                // capture the dead-end into memory and the parent app can
+                // escalate.
+                if let Some(data) = self.blocked_signal.lock().ok().and_then(|mut s| s.take()) {
+                    self.state = WorkerState::Failed;
+                    self.hook
+                        .send_status(format!("blocked: {}", data.reason.kind_tag()));
+                    self.write_failure_log(
+                        &history,
+                        &format!("blocked: {}", data.reason.describe()),
+                    );
+                    self.persist_transcript(&compacted_history, &history).await;
+                    tracing::warn!(
+                        worker_id = %self.id,
+                        reason = %data.reason.kind_tag(),
+                        url = ?data.url,
+                        "worker short-circuited on blocked signal"
+                    );
+                    return Ok(WorkerOutcome::Blocked {
+                        reason: data.reason,
+                        url: data.url,
+                        evidence: Box::new(data.evidence),
+                    });
+                }
+
                 segments_run += 1;
                 self.segments_run
                     .store(segments_run, std::sync::atomic::Ordering::Relaxed);

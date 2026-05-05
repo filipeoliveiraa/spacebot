@@ -39,6 +39,7 @@ enum WorkerCompletionKind {
     Partial,
     Cancelled,
     Timeout,
+    Blocked,
     Failed,
 }
 
@@ -97,6 +98,13 @@ fn classify_worker_completion(
             ),
             WorkerCompletionKind::Timeout,
         ),
+        Ok(WorkerOutcome::Blocked { reason, url, .. }) => {
+            let body = match url {
+                Some(url) => format!("Worker blocked: {} at {url}", reason.describe()),
+                None => format!("Worker blocked: {}", reason.describe()),
+            };
+            (body, WorkerCompletionKind::Blocked)
+        }
         Ok(WorkerOutcome::Failed { reason }) => (
             format!("Worker failed: {reason}"),
             WorkerCompletionKind::Failed,
@@ -1116,6 +1124,9 @@ where
             WorkerCompletionKind::Timeout => {
                 tracing::warn!(worker_id = %worker_id, result = %result_text, "worker timed out");
             }
+            WorkerCompletionKind::Blocked => {
+                tracing::warn!(worker_id = %worker_id, result = %result_text, "worker blocked");
+            }
             WorkerCompletionKind::Failed => {
                 tracing::error!(worker_id = %worker_id, result = %result_text, "worker failed");
             }
@@ -1169,6 +1180,20 @@ where
             elapsed_secs,
             segments_run,
         },
+        WorkerOutcome::Blocked {
+            reason,
+            url,
+            mut evidence,
+        } => {
+            if let Some(snippet) = evidence.html_snippet.take() {
+                evidence.html_snippet = Some(scrub(snippet));
+            }
+            WorkerOutcome::Blocked {
+                reason,
+                url,
+                evidence,
+            }
+        }
         WorkerOutcome::Failed { reason } => WorkerOutcome::Failed {
             reason: scrub(reason),
         },
@@ -1481,6 +1506,22 @@ mod tests {
             text,
             "Worker exceeded 1800s wall-clock timeout after 7 segments."
         );
+        assert!(notify);
+        assert!(!success);
+    }
+
+    #[test]
+    fn blocked_outcome_is_classified_as_unsuccessful() {
+        use crate::agent::worker::{BlockEvidence, BlockReason};
+        let (text, notify, success) = map_worker_completion(Ok(WorkerOutcome::Blocked {
+            reason: BlockReason::Captcha {
+                provider: "cloudflare-turnstile".to_string(),
+            },
+            url: Some("https://example.com/signup".to_string()),
+            evidence: Box::new(BlockEvidence::default()),
+        }));
+        assert!(text.contains("captcha"));
+        assert!(text.contains("https://example.com/signup"));
         assert!(notify);
         assert!(!success);
     }
