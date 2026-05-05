@@ -80,6 +80,7 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "api",
     "metrics",
     "telemetry",
+    "memory_janitor",
 ];
 
 /// Pre-parse check that warns about unrecognised top-level keys in a config
@@ -188,6 +189,16 @@ impl CortexConfig {
             );
         }
 
+        let worker_wall_clock_timeout_secs = overrides
+            .worker_wall_clock_timeout_secs
+            .unwrap_or(defaults.worker_wall_clock_timeout_secs);
+        if worker_wall_clock_timeout_secs < 1 {
+            return Err(ConfigError::Invalid(
+                "worker_wall_clock_timeout_secs must be >= 1".to_string(),
+            )
+            .into());
+        }
+
         let config = CortexConfig {
             mode: overrides.mode.unwrap_or(defaults.mode),
             tick_interval_secs: overrides
@@ -196,9 +207,7 @@ impl CortexConfig {
             worker_timeout_secs: overrides
                 .worker_timeout_secs
                 .unwrap_or(defaults.worker_timeout_secs),
-            worker_wall_clock_timeout_secs: overrides
-                .worker_wall_clock_timeout_secs
-                .unwrap_or(defaults.worker_wall_clock_timeout_secs),
+            worker_wall_clock_timeout_secs,
             cron_default_timeout_secs: overrides
                 .cron_default_timeout_secs
                 .or(defaults.cron_default_timeout_secs),

@@ -20,6 +20,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Per-agent maintenance budget. Generous because LanceDB index rebuilds
+/// can take a while for large memory stores, but bounded so a single hung
+/// embedding call can't stall the whole janitor.
+const PER_AGENT_TIMEOUT_SECS: u64 = 600;
+
 /// Spawn the janitor task. Returns the join handle so the caller can keep
 /// it alive for the process lifetime.
 ///
@@ -45,12 +50,27 @@ pub fn spawn_memory_janitor(
             );
             for deps in agents {
                 let agent_id = deps.agent_id.clone();
-                if let Err(error) = run_maintenance_for_agent(&deps).await {
-                    tracing::warn!(
-                        %agent_id,
-                        %error,
-                        "janitor maintenance pass failed for agent"
-                    );
+                let per_agent = tokio::time::timeout(
+                    Duration::from_secs(PER_AGENT_TIMEOUT_SECS),
+                    run_maintenance_for_agent(&deps),
+                )
+                .await;
+                match per_agent {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            %agent_id,
+                            %error,
+                            "janitor maintenance pass failed for agent"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            %agent_id,
+                            timeout_secs = PER_AGENT_TIMEOUT_SECS,
+                            "janitor maintenance for agent exceeded timeout — skipping to next agent"
+                        );
+                    }
                 }
             }
         }
@@ -66,7 +86,7 @@ async fn run_maintenance_for_agent(deps: &AgentDeps) -> anyhow::Result<()> {
         merge_similarity_threshold: cortex.maintenance_merge_similarity_threshold,
     };
     let memory_search = &deps.memory_search;
-    crate::memory::maintenance::run_maintenance(
+    let report = crate::memory::maintenance::run_maintenance(
         memory_search.store(),
         memory_search.embedding_table(),
         memory_search.embedding_model_arc(),
@@ -74,5 +94,14 @@ async fn run_maintenance_for_agent(deps: &AgentDeps) -> anyhow::Result<()> {
     )
     .await
     .map_err(|error| anyhow::anyhow!("memory maintenance failed: {error}"))?;
+
+    // Prunes and merges change memory content; decay is importance-only and
+    // does not dirty knowledge synthesis. Mirrors the cortex-loop path in
+    // `cortex.rs` so dormant agents don't get a stale memory bulletin /
+    // knowledge synthesis after a janitor pass that pruned or merged.
+    if report.pruned > 0 || report.merged > 0 {
+        deps.runtime_config.bump_knowledge_synthesis_version();
+    }
+
     Ok(())
 }

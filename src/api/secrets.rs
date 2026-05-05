@@ -99,7 +99,12 @@ pub async fn list_secrets(State(state): State<Arc<ApiState>>) -> impl IntoRespon
         Err(e) => return e.into_response(),
     };
 
-    match store.list_metadata(None) {
+    // Restrict to InstanceShared until per-agent CRUD endpoints land — the
+    // existing PUT/DELETE/INFO endpoints only operate on shared scope, so
+    // surfacing agent-scoped rows here would let the dashboard show entries
+    // it can't read or mutate. Agent-scoped secrets get their own listing
+    // through the per-agent endpoints (forthcoming).
+    match store.list_metadata(Some(&SecretScope::shared())) {
         Ok(metadata) => {
             let mut secrets: Vec<SecretListItem> = metadata
                 .into_iter()
@@ -111,9 +116,7 @@ pub async fn list_secrets(State(state): State<Arc<ApiState>>) -> impl IntoRespon
                     updated_at: meta.updated_at,
                 })
                 .collect();
-            secrets.sort_by(|a, b| {
-                (a.scope.to_string(), a.name.clone()).cmp(&(b.scope.to_string(), b.name.clone()))
-            });
+            secrets.sort_by(|a, b| a.name.cmp(&b.name));
             Json(SecretListResponse { secrets }).into_response()
         }
         Err(error) => (

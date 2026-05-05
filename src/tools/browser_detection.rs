@@ -17,12 +17,13 @@ pub struct Detection {
 
 /// Inspect the page snapshot and return a detection if any heuristic fires.
 /// Caller passes the raw page HTML (full content), the final URL after any
-/// redirects, and optionally a navigation target host so the login-wall path
-/// detector can avoid false-positive on intentional logins.
+/// redirects, and optionally the originally-requested URL so the login-wall
+/// detector can distinguish a deliberate sign-in navigation from an
+/// unexpected redirect into a login page.
 pub fn classify(
     html: &str,
     final_url: Option<&str>,
-    navigation_target_host: Option<&str>,
+    requested_url: Option<&str>,
 ) -> Option<Detection> {
     if let Some(reason) = detect_captcha(html) {
         return Some(Detection {
@@ -36,7 +37,7 @@ pub fn classify(
             evidence: build_evidence(html, final_url),
         });
     }
-    if let Some(reason) = detect_login_wall(final_url, navigation_target_host) {
+    if let Some(reason) = detect_login_wall(final_url, requested_url) {
         return Some(Detection {
             reason,
             evidence: build_evidence(html, final_url),
@@ -95,39 +96,60 @@ pub fn detect_cloudflare_challenge(html: &str) -> Option<BlockReason> {
     None
 }
 
-/// Detect that the navigation landed on a login URL distinct from the
-/// requested host's intended page. We require either a path that explicitly
-/// signals login, or a same-host redirect into a login path. Without a
-/// requested-target host, we only fire on the explicit signals.
+/// Detect that the navigation landed on a login URL distinct from where the
+/// caller meant to go. Conservative on purpose — a worker that intentionally
+/// navigates to `/login` or clicks a "Sign in" button would otherwise be
+/// classified as blocked, breaking normal auth flows.
+///
+/// Heuristic: only fire when the *final* path matches a login signal AND
+/// the caller's *requested* path does not. If the requested URL was itself
+/// a login page, treat the navigation as intentional. If no requested URL
+/// is supplied (e.g. follow-up click without context), we err toward not
+/// firing — the cost of a false positive (worker dies mid-task) is higher
+/// than the cost of a false negative (LLM sees the login page and decides
+/// what to do).
 pub fn detect_login_wall(
     final_url: Option<&str>,
-    navigation_target_host: Option<&str>,
+    requested_url: Option<&str>,
 ) -> Option<BlockReason> {
-    let url = final_url?;
-    let parsed = url::Url::parse(url).ok()?;
-    let path = parsed.path().to_lowercase();
-    let login_path_signals = [
+    let final_parsed = url::Url::parse(final_url?).ok()?;
+    let final_path = final_parsed.path().to_lowercase();
+    if !path_signals_login(&final_path) {
+        return None;
+    }
+
+    // Need a requested URL to distinguish unexpected redirect from
+    // intentional login navigation.
+    let requested = requested_url?;
+    let requested_parsed = url::Url::parse(requested).ok()?;
+    let requested_host = requested_parsed.host_str().unwrap_or("");
+    let final_host = final_parsed.host_str().unwrap_or("");
+    if !final_host.eq_ignore_ascii_case(requested_host) {
+        // Cross-host redirect to login (e.g. SSO bounce) — not an
+        // unexpected block, just a normal auth handoff.
+        return None;
+    }
+
+    let requested_path = requested_parsed.path().to_lowercase();
+    if path_signals_login(&requested_path) {
+        // Caller asked to go to a login page — they meant it.
+        return None;
+    }
+
+    Some(BlockReason::LoginWall)
+}
+
+fn path_signals_login(path: &str) -> bool {
+    const LOGIN_PATH_SIGNALS: [&str; 5] = [
         "/login",
         "/signin",
         "/auth/",
         "/account/login",
         "/users/sign_in",
     ];
-    let path_is_login = login_path_signals
+    LOGIN_PATH_SIGNALS
         .iter()
-        .any(|signal| path.contains(signal));
-    if !path_is_login {
-        return None;
-    }
-    if let Some(target_host) = navigation_target_host {
-        let final_host = parsed.host_str().unwrap_or("");
-        if final_host.eq_ignore_ascii_case(target_host) {
-            return Some(BlockReason::LoginWall);
-        }
-    } else {
-        return Some(BlockReason::LoginWall);
-    }
-    None
+        .any(|signal| path.contains(signal))
 }
 
 /// Build the captured evidence payload (truncated HTML + URL).
@@ -213,32 +235,50 @@ mod tests {
     }
 
     #[test]
-    fn login_path_with_matching_host_detected() {
+    fn unexpected_redirect_to_login_detected() {
         let reason = detect_login_wall(
             Some("https://example.com/login?return_to=/dashboard"),
-            Some("example.com"),
+            Some("https://example.com/dashboard"),
         );
         assert!(matches!(reason, Some(BlockReason::LoginWall)));
     }
 
     #[test]
-    fn login_path_with_no_target_host_still_detected() {
-        let reason = detect_login_wall(Some("https://example.com/account/login"), None);
-        assert!(matches!(reason, Some(BlockReason::LoginWall)));
+    fn intentional_login_navigation_not_classified() {
+        // Caller asked to go to /login. This is a deliberate sign-in flow,
+        // not a block.
+        let reason = detect_login_wall(
+            Some("https://example.com/login"),
+            Some("https://example.com/login"),
+        );
+        assert!(reason.is_none());
     }
 
     #[test]
-    fn login_path_on_different_host_does_not_fire() {
+    fn cross_host_sso_redirect_not_classified() {
+        // SSO bounce is a normal auth handoff, not a block.
         let reason = detect_login_wall(
             Some("https://identity-provider.com/login"),
-            Some("example.com"),
+            Some("https://example.com/dashboard"),
         );
         assert!(reason.is_none());
     }
 
     #[test]
     fn dashboard_url_not_login_wall() {
-        let reason = detect_login_wall(Some("https://example.com/dashboard"), Some("example.com"));
+        let reason = detect_login_wall(
+            Some("https://example.com/dashboard"),
+            Some("https://example.com/dashboard"),
+        );
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn no_requested_url_treats_as_intentional() {
+        // Without context, err toward not firing — false positives kill
+        // valid worker runs; false negatives just let the LLM see a login
+        // page and decide.
+        let reason = detect_login_wall(Some("https://example.com/account/login"), None);
         assert!(reason.is_none());
     }
 

@@ -850,8 +850,18 @@ impl BrowserContext {
         })?;
         if let Some(agent_id) = self.agent_id.as_ref() {
             let agent_scope = crate::secrets::store::SecretScope::agent(agent_id);
-            if let Ok(secret) = store.get(&agent_scope, name) {
-                return Ok(secret);
+            // Fall back to shared only when the agent-scoped key truly
+            // doesn't exist. Decryption / read errors must surface — silently
+            // typing the shared value would inject the wrong tenant's
+            // credential into a `browser_type` call.
+            match store.get(&agent_scope, name) {
+                Ok(secret) => return Ok(secret),
+                Err(crate::error::SecretsError::NotFound { .. }) => {}
+                Err(error) => {
+                    return Err(BrowserError::new(format!(
+                        "failed to resolve agent-scoped secret '{name}': {error}"
+                    )));
+                }
             }
         }
         store
@@ -2313,10 +2323,7 @@ async fn run_block_detection(
     requested_url: Option<&str>,
 ) -> Option<crate::tools::browser_detection::Detection> {
     let html = page.content().await.ok()?;
-    let target_host = requested_url
-        .and_then(|u| url::Url::parse(u).ok())
-        .and_then(|u| u.host_str().map(String::from));
-    crate::tools::browser_detection::classify(&html, final_url, target_host.as_deref())
+    crate::tools::browser_detection::classify(&html, final_url, requested_url)
 }
 
 /// Get the active page, or create a first one if the browser has no pages yet.

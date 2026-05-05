@@ -8,7 +8,7 @@ This doc is the cluster of changes that close the gap between "Spacebot can do t
 
 The parent application has many entities (customers, accounts, listings, projects — domain depends). Each entity benefits from a dedicated, persistent agent that:
 
-- Owns its entity's history forever (not pollluted by other entities' context)
+- Owns its entity's history forever (not polluted by other entities' context)
 - Holds isolated credentials (vendor keys, OAuth tokens) that other entities' agents must not see
 - Wakes only when there's something to do — entities are mostly idle most of the time
 - Reports outcomes back to the parent app via the existing HTTP / webhook surface
@@ -122,7 +122,7 @@ Wake `try_send` is non-blocking; on full channel, log and drop (the trigger work
 
 Wake sequence:
 
-```
+```text
 trigger fires
   → cortex::wake(agent_id, trigger)
       → check cached bulletin: if within grace period, reuse

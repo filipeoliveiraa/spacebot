@@ -838,6 +838,7 @@ impl Worker {
 
         // For interactive workers, enter a follow-up loop
         let mut follow_up_failure: Option<String> = None;
+        let mut follow_up_blocked: Option<BlockSignalData> = None;
         if let Some(mut input_rx) = self.input_rx.take() {
             if !resuming {
                 // Fresh worker: persist transcript and signal idle for the first time.
@@ -851,6 +852,15 @@ impl Worker {
             while let Some(follow_up) = input_rx.recv().await {
                 self.state = WorkerState::Running;
                 self.hook.send_status("processing follow-up");
+
+                // Honor a blocked signal that may have arrived while we were
+                // idle waiting for input. Browser tools called during a prior
+                // follow-up turn may have detected captcha / login / WAF
+                // after the turn returned.
+                if let Some(data) = self.blocked_signal.lock().ok().and_then(|mut s| s.take()) {
+                    follow_up_blocked = Some(data);
+                    break;
+                }
 
                 // Dedup stale tool results and compact before follow-up if needed
                 dedup_tool_results(&mut history);
@@ -970,6 +980,28 @@ impl Worker {
                         }
                     }
                     Err(failure_reason) => {
+                        // Surface as Blocked when the failure was caused by a
+                        // browser tool detecting captcha / login / WAF — the
+                        // tool returned an error that bubbled up here, but
+                        // also wrote to `blocked_signal`. Without this check,
+                        // phase 4's structured Blocked outcome would
+                        // regress to a generic Failed for interactive
+                        // workers hitting blocks mid-conversation.
+                        if let Some(data) =
+                            self.blocked_signal.lock().ok().and_then(|mut s| s.take())
+                        {
+                            follow_up_blocked = Some(data);
+                            self.state = WorkerState::Failed;
+                            self.hook.send_status(format!(
+                                "blocked: {}",
+                                follow_up_blocked
+                                    .as_ref()
+                                    .expect("just set")
+                                    .reason
+                                    .kind_tag()
+                            ));
+                            break;
+                        }
                         self.state = WorkerState::Failed;
                         self.hook.send_status("failed");
                         follow_up_failure = Some(failure_reason);
@@ -982,6 +1014,21 @@ impl Worker {
                 self.hook.send_status("waiting for input");
                 self.hook.send_worker_idle();
             }
+        }
+
+        if let Some(data) = follow_up_blocked {
+            self.persist_transcript(&compacted_history, &history).await;
+            tracing::warn!(
+                worker_id = %self.id,
+                reason = %data.reason.kind_tag(),
+                url = ?data.url,
+                "worker follow-up short-circuited on blocked signal"
+            );
+            return Ok(WorkerOutcome::Blocked {
+                reason: data.reason,
+                url: data.url,
+                evidence: Box::new(data.evidence),
+            });
         }
 
         if let Some(failure_reason) = follow_up_failure {

@@ -21,7 +21,7 @@ use crate::llm::SpacebotModel;
 use crate::memory::maintenance as memory_maintenance;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
 use crate::memory::types::{Association, MemoryType, RelationType};
-use crate::tasks::{TaskStatus, UpdateTaskInput};
+use crate::tasks::{TaskStatus, TaskStore, UpdateTaskInput};
 use crate::{
     AgentDeps, AgentId, BranchId, ChannelId, ProcessEvent, ProcessId, ProcessType, WorkerId,
 };
@@ -3691,6 +3691,177 @@ pub fn spawn_association_loop(
     })
 }
 
+/// How to route a completed detached worker against the task store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetachedRouting {
+    /// Worker produced a usable result — mark `Done` and notify success.
+    Success,
+    /// Terminal failure that won't fix itself (cancelled, wall-clock
+    /// timeout, captcha / login wall). Mark `Done` so the loop doesn't
+    /// pick the task up again; emit a failure event so callers can react
+    /// (escalate to a human, raise a follow-up task, etc.).
+    Terminal,
+    /// Transient failure (LLM error, panic, generic Failed). Requeue to
+    /// `Ready` so the next pickup pass can retry.
+    Requeue,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_detached_completion(
+    routing: DetachedRouting,
+    task: &crate::tasks::Task,
+    worker_id: WorkerId,
+    result_text: &str,
+    task_store: &Arc<TaskStore>,
+    run_logger: &crate::conversation::history::ProcessRunLogger,
+    logger: &CortexLogger,
+    event_tx: &tokio::sync::broadcast::Sender<ProcessEvent>,
+    agent_id: &str,
+    links: &Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
+    agent_names: &Arc<std::collections::HashMap<String, String>>,
+    sqlite_pool: &sqlx::SqlitePool,
+    injection_tx: &tokio::sync::mpsc::Sender<crate::ChannelInjection>,
+) {
+    let success = matches!(routing, DetachedRouting::Success);
+    let new_status = match routing {
+        DetachedRouting::Success | DetachedRouting::Terminal => TaskStatus::Done,
+        DetachedRouting::Requeue => TaskStatus::Ready,
+    };
+    let update_input = match routing {
+        DetachedRouting::Success | DetachedRouting::Terminal => UpdateTaskInput {
+            status: Some(new_status),
+            ..Default::default()
+        },
+        DetachedRouting::Requeue => UpdateTaskInput {
+            status: Some(new_status),
+            clear_worker_id: true,
+            ..Default::default()
+        },
+    };
+
+    let update_result = task_store.update(task.task_number, update_input).await;
+    let persisted = match update_result {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            tracing::warn!(
+                task_number = task.task_number,
+                routing = ?routing,
+                "task store returned no row when updating completed task — task may have been deleted"
+            );
+            logger.log(
+                "task_pickup_no_row",
+                &format!(
+                    "Picked-up task #{} completed ({routing:?}) but the task row was missing on update",
+                    task.task_number
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "worker_id": worker_id.to_string(),
+                    "routing": format!("{routing:?}"),
+                })),
+            );
+            run_logger.log_worker_completed(worker_id, result_text, false);
+            let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                agent_id: Arc::from(agent_id),
+                worker_id,
+                channel_id: None,
+                result: result_text.to_string(),
+                notify: true,
+                success: false,
+            });
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                task_number = task.task_number,
+                routing = ?routing,
+                "failed to persist task status after worker completion"
+            );
+            run_logger.log_worker_completed(worker_id, result_text, false);
+            logger.log(
+                "task_pickup_persist_failure",
+                &format!(
+                    "Picked-up task #{} ({routing:?}) could not persist status: {error}",
+                    task.task_number
+                ),
+                Some(serde_json::json!({
+                    "task_number": task.task_number,
+                    "worker_id": worker_id.to_string(),
+                    "routing": format!("{routing:?}"),
+                })),
+            );
+            let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                agent_id: Arc::from(agent_id),
+                worker_id,
+                channel_id: None,
+                result: result_text.to_string(),
+                notify: true,
+                success: false,
+            });
+            return;
+        }
+    };
+
+    if !persisted {
+        return;
+    }
+
+    run_logger.log_worker_completed(worker_id, result_text, success);
+    let _ = event_tx.send(ProcessEvent::TaskUpdated {
+        agent_id: Arc::from(agent_id),
+        task_number: task.task_number,
+        status: new_status.as_str().to_string(),
+        action: "updated".to_string(),
+    });
+
+    let log_event = match routing {
+        DetachedRouting::Success => "task_pickup_completed",
+        DetachedRouting::Terminal => "task_pickup_terminal_failure",
+        DetachedRouting::Requeue => "task_pickup_failed",
+    };
+    let log_message = match routing {
+        DetachedRouting::Success => format!("Completed picked-up task #{}", task.task_number),
+        DetachedRouting::Terminal => format!(
+            "Terminal failure on picked-up task #{}: {result_text}",
+            task.task_number
+        ),
+        DetachedRouting::Requeue => {
+            format!("Picked-up task #{} failed: {result_text}", task.task_number)
+        }
+    };
+    logger.log(
+        log_event,
+        &log_message,
+        Some(serde_json::json!({
+            "task_number": task.task_number,
+            "worker_id": worker_id.to_string(),
+            "routing": format!("{routing:?}"),
+        })),
+    );
+
+    notify_delegation_completion(
+        task,
+        result_text,
+        success,
+        agent_id,
+        links,
+        agent_names,
+        sqlite_pool,
+        injection_tx,
+    )
+    .await;
+
+    let _ = event_tx.send(ProcessEvent::WorkerComplete {
+        agent_id: Arc::from(agent_id),
+        worker_id,
+        channel_id: None,
+        result: result_text.to_string(),
+        notify: true,
+        success,
+    });
+}
+
 /// One-shot wake for dormant agents.
 ///
 /// Triggered by `agent::wake::WakeManager` when an external event delivers
@@ -3944,182 +4115,66 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             if let Some(worker_result) = worker_result {
                 let completion_won = claim_detached_completion(&detached_worker_lifecycle);
                 if completion_won {
-                    // Convert the worker's structured outcome (or panic / error)
-                    // into a single Result<WorkerOutcome, WorkerCompletionError>
-                    // so the success / failure split below is driven by one
-                    // notion of "did it work".
-                    let normalized: std::result::Result<WorkerOutcome, WorkerCompletionError> =
-                        match worker_result {
-                            Ok(Ok(outcome)) => Ok(outcome),
-                            Ok(Err(error)) => {
-                                Err(WorkerCompletionError::failed(scrub(error.to_string())))
-                            }
-                            Err(panic_payload) => {
-                                let panic_message =
-                                    crate::agent::panic_payload_to_string(&*panic_payload);
-                                tracing::error!(
-                                    %worker_id,
-                                    %panic_message,
-                                    "cortex worker task panicked"
-                                );
-                                Err(WorkerCompletionError::failed(format!(
-                                    "worker task panicked: {}",
-                                    scrub(panic_message)
-                                )))
-                            }
-                        };
-                    let (result_text, _notify, success) = map_worker_completion(normalized);
+                    // Convert the raw worker_result into a Result<WorkerOutcome, _>
+                    // so the routing decision below can inspect the variant kind
+                    // — Timeout / Blocked / Cancelled need terminal handling so
+                    // they don't hot-loop on requeue to Ready.
+                    let outcome_or_error: std::result::Result<
+                        WorkerOutcome,
+                        WorkerCompletionError,
+                    > = match worker_result {
+                        Ok(Ok(outcome)) => Ok(outcome),
+                        Ok(Err(error)) => {
+                            Err(WorkerCompletionError::failed(scrub(error.to_string())))
+                        }
+                        Err(panic_payload) => {
+                            let panic_message =
+                                crate::agent::panic_payload_to_string(&*panic_payload);
+                            tracing::error!(
+                                %worker_id,
+                                %panic_message,
+                                "cortex worker task panicked"
+                            );
+                            Err(WorkerCompletionError::failed(format!(
+                                "worker task panicked: {}",
+                                scrub(panic_message)
+                            )))
+                        }
+                    };
+
+                    // Routing: Success/Partial → mark Done.
+                    // Cancelled/Timeout/Blocked → terminal (mark Done, do not
+                    // retry — these need human / explicit re-creation, not a
+                    // pickup loop racing the same dead end again).
+                    // Failed/error/panic → requeue Ready (true transient errors
+                    // that might succeed on a future tick).
+                    let routing = match &outcome_or_error {
+                        Ok(WorkerOutcome::Success { .. }) | Ok(WorkerOutcome::Partial { .. }) => {
+                            DetachedRouting::Success
+                        }
+                        Ok(WorkerOutcome::Cancelled { .. })
+                        | Ok(WorkerOutcome::Timeout { .. })
+                        | Ok(WorkerOutcome::Blocked { .. }) => DetachedRouting::Terminal,
+                        Ok(WorkerOutcome::Failed { .. }) | Err(_) => DetachedRouting::Requeue,
+                    };
+                    let (result_text, _notify, _success) = map_worker_completion(outcome_or_error);
                     let result_text = scrub(result_text);
-                    if success {
-                        let db_updated = task_store
-                            .update(
-                                task.task_number,
-                                UpdateTaskInput {
-                                    status: Some(TaskStatus::Done),
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-
-                        if let Err(ref error) = db_updated {
-                            tracing::warn!(
-                                %error,
-                                task_number = task.task_number,
-                                "failed to mark picked-up task done"
-                            );
-                            run_logger.log_worker_completed(worker_id, &result_text, false);
-                            logger.log(
-                                "task_pickup_completed_persist_failure",
-                                &format!(
-                                    "Picked-up task #{} completed but could not persist done state: {error}",
-                                    task.task_number
-                                ),
-                                Some(serde_json::json!({
-                                    "task_number": task.task_number,
-                                    "worker_id": worker_id.to_string(),
-                                })),
-                            );
-                            let _ = event_tx.send(ProcessEvent::WorkerComplete {
-                                agent_id: Arc::from(agent_id.as_str()),
-                                worker_id,
-                                channel_id: None,
-                                result: result_text,
-                                notify: true,
-                                success: false,
-                            });
-                        } else {
-                            run_logger.log_worker_completed(worker_id, &result_text, true);
-                            let _ = event_tx.send(ProcessEvent::TaskUpdated {
-                                agent_id: Arc::from(agent_id.as_str()),
-                                task_number: task.task_number,
-                                status: "done".to_string(),
-                                action: "updated".to_string(),
-                            });
-
-                            logger.log(
-                                "task_pickup_completed",
-                                &format!("Completed picked-up task #{}", task.task_number),
-                                Some(serde_json::json!({
-                                    "task_number": task.task_number,
-                                    "worker_id": worker_id.to_string(),
-                                })),
-                            );
-
-                            notify_delegation_completion(
-                                &task,
-                                &result_text,
-                                true,
-                                &agent_id,
-                                &links,
-                                &agent_names,
-                                &sqlite_pool,
-                                &injection_tx,
-                            )
-                            .await;
-
-                            let _ = event_tx.send(ProcessEvent::WorkerComplete {
-                                agent_id: Arc::from(agent_id.as_str()),
-                                worker_id,
-                                channel_id: None,
-                                result: result_text,
-                                notify: true,
-                                success: true,
-                            });
-                        }
-                    } else {
-                        run_logger.log_worker_completed(worker_id, &result_text, false);
-                        let requeue_result = task_store
-                            .update(
-                                task.task_number,
-                                UpdateTaskInput {
-                                    status: Some(TaskStatus::Ready),
-                                    clear_worker_id: true,
-                                    ..Default::default()
-                                },
-                            )
-                            .await;
-
-                        if let Err(ref update_error) = requeue_result {
-                            tracing::warn!(
-                                %update_error,
-                                task_number = task.task_number,
-                                "failed to return task to ready after worker failure"
-                            );
-                            logger.log(
-                                "task_pickup_failed_to_persist",
-                                &format!(
-                                    "Picked-up task #{} failed but could not persist failure state: {result_text}",
-                                    task.task_number
-                                ),
-                                Some(serde_json::json!({
-                                    "task_number": task.task_number,
-                                    "worker_id": worker_id.to_string(),
-                                    "error": result_text.clone(),
-                                })),
-                            );
-                        } else {
-                            let _ = event_tx.send(ProcessEvent::TaskUpdated {
-                                agent_id: Arc::from(agent_id.as_str()),
-                                task_number: task.task_number,
-                                status: "ready".to_string(),
-                                action: "updated".to_string(),
-                            });
-
-                            logger.log(
-                                "task_pickup_failed",
-                                &format!(
-                                    "Picked-up task #{} failed: {result_text}",
-                                    task.task_number
-                                ),
-                                Some(serde_json::json!({
-                                    "task_number": task.task_number,
-                                    "worker_id": worker_id.to_string(),
-                                    "error": result_text.clone(),
-                                })),
-                            );
-
-                            notify_delegation_completion(
-                                &task,
-                                &result_text,
-                                false,
-                                &agent_id,
-                                &links,
-                                &agent_names,
-                                &sqlite_pool,
-                                &injection_tx,
-                            )
-                            .await;
-                        }
-
-                        let _ = event_tx.send(ProcessEvent::WorkerComplete {
-                            agent_id: Arc::from(agent_id.as_str()),
-                            worker_id,
-                            channel_id: None,
-                            result: result_text,
-                            notify: true,
-                            success: false,
-                        });
-                    }
+                    handle_detached_completion(
+                        routing,
+                        &task,
+                        worker_id,
+                        &result_text,
+                        &task_store,
+                        &run_logger,
+                        &logger,
+                        &event_tx,
+                        &agent_id,
+                        &links,
+                        &agent_names,
+                        &sqlite_pool,
+                        &injection_tx,
+                    )
+                    .await;
 
                     let _ = detached_worker_lifecycle.compare_exchange(
                         crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_COMPLETING,

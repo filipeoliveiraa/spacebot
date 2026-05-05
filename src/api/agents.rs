@@ -998,6 +998,15 @@ pub async fn create_agent_internal(
     let tool_output_rx = tool_output_tx.subscribe();
     state.register_tool_output_stream(agent_id.clone(), tool_output_rx);
 
+    // Register with the wake manager so dormant-mode triggers can reach
+    // this agent. Without this, agents created at runtime would never
+    // receive cross-agent message wakes or admin /wake calls.
+    state
+        .wake_registry
+        .write()
+        .await
+        .insert(arc_agent_id.clone(), deps.clone());
+
     let cron_store = std::sync::Arc::new(crate::cron::CronStore::new(db.sqlite.clone()));
     let cron_context = crate::cron::CronContext {
         deps: deps.clone(),
@@ -1343,6 +1352,13 @@ pub(super) async fn delete_agent(
                 "message": format!("Agent '{agent_id}' not found")
             })));
         }
+    }
+
+    // Drop the wake-manager registration so wakes addressed to this agent
+    // are silently dropped instead of dispatching to a torn-down deps.
+    {
+        let key: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
+        state.wake_registry.write().await.remove(&key);
     }
 
     // Remove the [[agents]] entry from config.toml

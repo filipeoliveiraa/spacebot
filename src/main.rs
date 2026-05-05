@@ -2776,9 +2776,10 @@ async fn initialize_agents(
     // Wake-dispatch infrastructure for dormant-mode agents. Always spawned
     // so active-mode agents can also participate (cron / message wake hooks
     // are mode-agnostic — `cortex::wake_one` is a no-op contention with the
-    // active loop's pickup, harmless either way).
-    let wake_registry: Arc<tokio::sync::RwLock<HashMap<spacebot::AgentId, spacebot::AgentDeps>>> =
-        Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    // active loop's pickup, harmless either way). The registry lives on
+    // `api_state` so runtime agent-create / agent-delete paths can keep it
+    // in sync without going through main.
+    let wake_registry = api_state.wake_registry.clone();
     let wake_tx = spacebot::agent::wake::spawn_wake_manager(wake_registry.clone());
     api_state.wake_tx.store(Arc::new(Some(wake_tx.clone())));
 
@@ -3141,6 +3142,13 @@ async fn initialize_agents(
         let mut startup_warmup = tokio::task::JoinSet::new();
 
         for (agent_id, agent) in agents.iter() {
+            // Dormant agents stay cold at startup — running warmup here would
+            // touch model/embedding load paths the dormant-mode contract
+            // promises to skip until an explicit wake.
+            if agent.deps.runtime_config.cortex.load().mode.is_dormant() {
+                tracing::info!(agent_id = %agent_id, "startup warmup skipped: dormant");
+                continue;
+            }
             let deps = agent.deps.clone();
             let sqlite_pool = agent.db.sqlite.clone();
             let agent_id = agent_id.clone();

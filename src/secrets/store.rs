@@ -590,6 +590,7 @@ impl SecretsStore {
 
     /// Delete a secret from the given scope.
     pub fn delete(&self, scope: &SecretScope, name: &str) -> Result<(), SecretsError> {
+        let _guard = self.mutation_guard.lock().expect("mutation guard poisoned");
         let write_txn = self.db.begin_write().map_err(|error| {
             SecretsError::Other(anyhow::anyhow!(
                 "failed to begin write transaction: {error}"
@@ -764,7 +765,11 @@ impl SecretsStore {
             }
         };
 
-        // Two-pass insert so agent-scoped values shadow same-named shared values.
+        // Two-pass insert so agent-scoped values shadow same-named shared
+        // values. When an agent-scoped row exists but fails to read, we
+        // explicitly drop any shared fallback for the same name — otherwise
+        // a tenant's worker could end up with another tenant's shared value
+        // injected under a name the dashboard says is per-agent.
         let mut result = HashMap::new();
         for ((scope, name), _meta) in metadata
             .iter()
@@ -784,8 +789,13 @@ impl SecretsStore {
             if !matches!(scope, SecretScope::Agent { id } if id == agent_id.as_ref()) {
                 continue;
             }
-            if let Some(value) = self.read_value(scope, name) {
-                result.insert(name.clone(), value);
+            match self.read_value(scope, name) {
+                Some(value) => {
+                    result.insert(name.clone(), value);
+                }
+                None => {
+                    result.remove(name);
+                }
             }
         }
         result
