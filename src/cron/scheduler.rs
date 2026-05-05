@@ -131,6 +131,11 @@ pub struct CronContext {
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 
+/// System-wide fallback for a cron job's wall-clock timeout when neither
+/// the job nor its owning agent specifies one. Generous because cron
+/// channels include an LLM synthesis step after the worker completes.
+pub const DEFAULT_CRON_TIMEOUT_SECS: u64 = 1500;
+
 /// RAII guard that clears an `AtomicBool` on drop, ensuring the flag is
 /// released even if the holding task panics.
 struct ExecutionGuard(Arc<std::sync::atomic::AtomicBool>);
@@ -1384,7 +1389,18 @@ async fn run_cron_job(
         ));
     }
 
-    let timeout = Duration::from_secs(job.timeout_secs.unwrap_or(1500));
+    // Resolution: per-job override → per-agent default → system default.
+    let agent_default = context
+        .deps
+        .runtime_config
+        .cortex
+        .load()
+        .cron_default_timeout_secs;
+    let timeout_secs = job
+        .timeout_secs
+        .or(agent_default)
+        .unwrap_or(DEFAULT_CRON_TIMEOUT_SECS);
+    let timeout = Duration::from_secs(timeout_secs);
 
     // Keep channel_tx alive — on timeout we send a "synthesize now" message
     // so the LLM gets a direct turn to compose the final reply.

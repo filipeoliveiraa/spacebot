@@ -1047,6 +1047,10 @@ pub struct CortexConfig {
     /// from `worker_timeout_secs` (which is idle-shaped). Catches the
     /// slow-drift case where a worker stays "active" but never completes.
     pub worker_wall_clock_timeout_secs: u64,
+    /// Per-agent default for cron job timeouts. `None` falls back to the
+    /// system default (`crate::cron::scheduler::DEFAULT_CRON_TIMEOUT_SECS`).
+    /// A per-job `timeout_secs` always wins over this default.
+    pub cron_default_timeout_secs: Option<u64>,
     pub branch_timeout_secs: u64,
     pub detached_worker_timeout_retry_limit: u8,
     pub supervisor_kill_budget_per_tick: usize,
@@ -1088,6 +1092,7 @@ impl Default for CortexConfig {
             worker_timeout_secs: 600,
             worker_wall_clock_timeout_secs:
                 crate::agent::worker::DEFAULT_WORKER_WALL_CLOCK_TIMEOUT_SECS,
+            cron_default_timeout_secs: None,
             branch_timeout_secs: 600,
             detached_worker_timeout_retry_limit: 2,
             supervisor_kill_budget_per_tick: 8,
